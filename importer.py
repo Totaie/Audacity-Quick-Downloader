@@ -1,7 +1,6 @@
 import os
 import sys
 
-
 if sys.platform == 'win32':
     print("pipe-test.py, running on windows")
     TONAME = '\\\\.\\pipe\\ToSrvPipe'
@@ -25,11 +24,11 @@ if not os.path.exists(FROMNAME):
 
 print("-- Both pipes exist.  Good.")
 
-TOFILE = open(TONAME, 'w')
+# Open the pipes with UTF-8 encoding
+TOFILE = open(TONAME, 'w', encoding='utf-8')
 print("-- File to write to has been opened")
-FROMFILE = open(FROMNAME, 'rt')
+FROMFILE = open(FROMNAME, 'rt', encoding='utf-8')
 print("-- File to read from has now been opened too\r\n")
-
 
 def send_command(command):
     """Send a single command."""
@@ -54,3 +53,14 @@ def do_command(command):
     response = get_response()
     print("Rcvd: <<< \n" + response)
     return response
+
+def import_selected_mp3_files(downloaded_files):
+    """Import the MP3 files into Audacity from a list of absolute file paths."""
+    for file_path in downloaded_files:
+        # Ensure the file path is properly formatted for Audacity (with quotes if spaces)
+        if ' ' in file_path:
+            file_path = f'"{file_path}"'
+
+        print(f"Importing file: {file_path}")
+        do_command(f"Import2: Filename={file_path}")
+
