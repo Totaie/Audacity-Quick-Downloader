@@ -2,7 +2,7 @@
 
 ## _Powered with Python_
 
-Audacity-YT-Downloader is a quick and easy MP3 importer for Audacity, saving you the time of needing to download an MP3 off of any sketchy YouTube-to-MP3 website.
+Audacity-Quick-Downloader is a quick and easy MP3 importer for Audacity, saving you the time of needing to download an MP3 off of any sketchy YouTube-to-MP3 website or Apple Music Website.
 
 ## Features
 
