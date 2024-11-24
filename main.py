@@ -1,12 +1,25 @@
-from downloader import download_youtube_audio
-from importer import import_selected_mp3_files
+from applemusicdownloader import download_apple_music
+from importer import import_mp3_files_batch, import_youtube_mp3_files
+from youtubedownloader import download_youtube_audio
 
-# Main logic
+
+def main():
+    url = input("Enter URL: ")
+
+    if "apple.com" in url:
+        print("Importing from Apple Music...")
+        downloaded_file = download_apple_music(url)
+
+        print(f"File downloaded and converted to MP3: {downloaded_file}")
+            
+        import_mp3_files_batch(downloaded_file)
+    elif "youtube.com" in url:
+        print("Importing from YouTube...")
+        downloaded_file = download_youtube_audio(url)
+        print(f"File downloaded and converted to MP3: {downloaded_file}")
+        import_youtube_mp3_files(downloaded_file)
+    else:
+        print("Invalid URL. Please provide a valid URL.")
+
 if __name__ == "__main__":
-    youtube_url = input("Enter YouTube Playlist URL: ")
-    
-    # Download all audio files from the playlist and get the list of downloaded files
-    downloaded_files = download_youtube_audio(youtube_url)
-    
-    # Import only the MP3 files that were downloaded
-    import_selected_mp3_files(downloaded_files)
+    main()
