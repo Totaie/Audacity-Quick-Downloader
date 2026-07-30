@@ -1,90 +1,143 @@
+"""Download Apple Music tracks with gamdl and convert them to MP3."""
+
 import subprocess
-import os
 from pathlib import Path
 
+from utils import (
+    AUDIO_EXTENSIONS,
+    DownloadError,
+    MissingDependency,
+    collect_files,
+    default_downloads_dir,
+    find_ffmpeg,
+    module_available,
+    move_into,
+    python_executable,
+    run_quiet,
+    temp_workspace,
+)
 
-def convert_to_mp3(input_file, output_file):
-    """Converts the downloaded M4A file to MP3 using ffmpeg."""
-    try:
-        subprocess.run(
-            [
-                "ffmpeg",
-                "-i",
-                str(input_file),
-                "-codec:a",
-                "libmp3lame",
-                "-qscale:a",
-                "2",
-                str(output_file),
-            ],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+DEFAULT_COOKIES = Path(__file__).resolve().parent / "cookies.txt"
+
+# gamdl names files "01 Title" by default. Asking for plain titles up front is
+# tidier than trying to strip leading track numbers back off afterwards.
+FILE_TEMPLATES = [
+    "--single-disc-file-template",
+    "{title}",
+    "--multi-disc-file-template",
+    "{title}",
+    "--no-album-file-template",
+    "{title}",
+]
+
+
+def convert_to_mp3(source, destination, quality="2"):
+    """Convert a downloaded track to MP3, keeping its tags and cover art."""
+    ffmpeg = find_ffmpeg()
+    base = [ffmpeg, "-y", "-loglevel", "error", "-i", str(source)]
+    encode = [
+        "-codec:a",
+        "libmp3lame",
+        "-qscale:a",
+        str(quality),
+        "-map_metadata",
+        "0",
+        "-id3v2_version",
+        "3",
+        str(destination),
+    ]
+
+    # First try keeps the embedded cover art; the fallback drops anything the
+    # MP3 container cannot hold (music videos, odd side streams).
+    attempts = [
+        base + ["-map", "0", "-codec:v", "copy"] + encode,
+        base + ["-map", "0:a"] + encode,
+    ]
+
+    last_output = ""
+    for command in attempts:
+        result = run_quiet(command)
+        if result.returncode == 0 and Path(destination).exists():
+            return Path(destination)
+        last_output = (result.stdout or "").strip()
+
+    raise DownloadError(f"ffmpeg could not convert {Path(source).name}: {last_output}")
+
+
+def _gamdl_command(url, destination, cookies):
+    """Build the gamdl call, running it through this interpreter.
+
+    Using "-m gamdl" rather than the gamdl executable means it works even when
+    the virtual environment has not been activated.
+    """
+    if not module_available("gamdl"):
+        raise MissingDependency(
+            "gamdl is not installed. Run: pip install -r requirements.txt"
         )
-        print(f"Converted to MP3: {output_file}")
-        return output_file
-    except subprocess.CalledProcessError as e:
-        print("Error converting to MP3:", e.stderr.decode())
+
+    return [
+        python_executable(),
+        "-m",
+        "gamdl",
+        "--cookies-path",
+        str(cookies),
+        "--output-path",
+        str(destination),
+        "--no-synced-lyrics",
+        *FILE_TEMPLATES,
+        url,
+    ]
 
 
-def find_m4a_files(output_dir):
-    """Finds all M4A files in the output directory and its subdirectories."""
-    m4a_files = []
-    for root, dirs, files in os.walk(output_dir):
-        for file in files:
-            if file.endswith(".m4a"):
-                m4a_files.append(Path(root) / file)
-    return m4a_files
+def download_apple_music(url, output_dir=None, cookies=None, quality="2"):
+    """Download ``url`` from Apple Music and return the MP3 paths saved on disk."""
+    output_dir = Path(output_dir) if output_dir else default_downloads_dir()
+    cookies = Path(cookies) if cookies else DEFAULT_COOKIES
 
-
-def clean_filename(filepath):
-    """Removes leading numbers and spaces from filename."""
-    path = Path(filepath)
-    filename = path.name
-    # Remove leading numbers and spaces, keeping the rest of the filename
-    clean_name = " ".join(part for part in filename.split(" ") if not part.isdigit())
-    return path.parent / clean_name
-
-
-def download_apple_music(url):
-    output_dir = os.path.join(os.getcwd(), "Downloads")
-
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
-    try:
-        print("Downloading from Apple Music...")
-        subprocess.run(
-            ["gamdl", url, "-o", output_dir],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+    if not cookies.exists():
+        raise MissingDependency(
+            f"No Apple Music cookies file at {cookies}. Export your cookies in "
+            "Netscape format while signed in to music.apple.com and save them "
+            "there (see the README)."
         )
 
-        downloaded_m4a_files = find_m4a_files(output_dir)
+    find_ffmpeg()  # fail early rather than after a long download
 
-        for m4a_file in downloaded_m4a_files:
-            mp3_output_file = m4a_file.with_suffix(".mp3")
-            # Convert to MP3
-            output_file = convert_to_mp3(m4a_file, mp3_output_file)
+    with temp_workspace(output_dir) as workspace:
+        command = _gamdl_command(url, workspace, cookies)
+        try:
+            # Output is left on the console so gamdl's progress stays visible.
+            result = subprocess.run(command, check=False)
+        except OSError as error:
+            raise DownloadError(f"Could not run gamdl: {error}")
 
-            # Clean the filename and rename
-            clean_output_file = clean_filename(output_file)
-            os.rename(output_file, clean_output_file)
+        downloaded = collect_files(workspace, AUDIO_EXTENSIONS)
+        if not downloaded:
+            raise DownloadError(
+                "gamdl did not download anything (exit code "
+                f"{result.returncode}). Common causes: expired cookies.txt, a "
+                "track your subscription cannot play, or a gamdl that has "
+                "fallen behind Apple's website - try "
+                "'pip install --upgrade gamdl'."
+            )
+        if result.returncode != 0:
+            print(
+                f"gamdl reported an error (exit code {result.returncode}); "
+                "importing the tracks it did manage to download."
+            )
 
-            # Remove the original M4A file
-            os.remove(m4a_file)
-            print(f"Successfully downloaded and converted: {clean_output_file.name}")
+        tracks = []
+        for source in downloaded:
+            if source.suffix.lower() == ".mp3":
+                tracks.append(move_into(source, output_dir))
+                continue
+            print(f"Converting {source.name} to MP3...")
+            mp3 = convert_to_mp3(source, source.with_suffix(".mp3"), quality=quality)
+            tracks.append(move_into(mp3, output_dir))
 
-        return clean_output_file
-    except subprocess.CalledProcessError as e:
-        print("Error downloading from Apple Music:", e.stderr.decode())
-        return None
+        return tracks
 
 
 if __name__ == "__main__":
-    apple_music_url = input("Enter Apple Music URL: ")
-    downloaded_folder = download_apple_music(apple_music_url)
-
-    if downloaded_folder:
-        print(f"Files downloaded and converted to MP3 in {downloaded_folder}")
+    for path in download_apple_music(input("Enter Apple Music URL: ").strip()):
+        print(path)

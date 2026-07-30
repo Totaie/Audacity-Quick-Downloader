@@ -1,122 +1,219 @@
-# Audacity-Quick-Downloader
+# Audacity Quick Downloader
 
-## _Powered with Python_
+_Powered with Python_
 
-Audacity-Quick-Downloader is a quick and easy MP3 importer for Audacity, saving you the time of needing to download an MP3 off of any sketchy YouTube-to-MP3 website or Apple Music Website.
+Paste a YouTube or Apple Music link and it lands in Audacity as a new track. No
+sketchy "YouTube to MP3" websites, no manual file juggling — the MP3 is saved to
+your `Downloads` folder and imported for you.
 
 ## Features
 
-- A `.bat` file to quickly run the Python script, with a shortcut for easy access anywhere.
-- Automatically imports your MP3 into Audacity after downloading.
-- Supports YouTube playlist downloads for easy batch importing of multiple MP3s.
-- **New:** Supports Apple Music downloads using cookies for authentication.
+- **Starts Audacity for you.** If it is not already running, it gets launched
+  and the import waits until it is ready.
+- **YouTube videos and playlists**, downloaded as tagged MP3s with the video
+  thumbnail embedded as cover art.
+- **Apple Music tracks, albums and playlists** via [gamdl], converted to MP3
+  with their tags and artwork intact.
+- **Command line or interactive.** Pass URLs as arguments, or run it with none
+  and paste links one after another.
+- **Nothing gets clobbered.** A file that would overwrite an existing download
+  is saved as `Song (1).mp3` instead.
+- **Downloads survive import failures.** If Audacity cannot be reached, the
+  MP3s are still saved and the reason is explained.
+- A `.bat` file for double-click running, which works from a shortcut anywhere.
+
+## Requirements
+
+| What | Why |
+| --- | --- |
+| Python 3.8+ | Runs the script (developed on 3.11). |
+| [Audacity] 3.1+ | The destination (developed on 3.7). |
+| Audacity's `mod-script-pipe` module | How the script talks to Audacity. |
+| [ffmpeg] on your `PATH` | Converts downloads to MP3. |
+| Apple Music subscription + `cookies.txt` | Only needed for Apple Music links. |
 
 ## Installation
 
-### Prerequisites
+**1. Clone the repository**
 
-Make sure you have the following installed:
+```bash
+git clone https://github.com/Totaie/Audacity-YT-Downloader.git
+```
 
-- **Python 3.8+** (We used Python 3.11.8, but it should work with any version above 3.8).
-- **Audacity 3.1+** (We used Audacity 3.4.2, but it should work with any version above 3.1).
-- **yt-dlp** (Python library for downloading YouTube videos).
-- **ffmpeg** (Required by yt-dlp to extract audio).
-- **Apple Music Subscription** (Required to download from Apple Music).
-- **Apple Music Cookies File** (Required to authenticate with Apple Music, see instructions below).
+**2. Install the Python dependencies**
 
-### Steps to Install
+```bash
+pip install -r requirements.txt
+```
 
-1. **Clone the Repository:**
+**3. Install ffmpeg**
 
-   ``git clone https://github.com/Totaie/Audacity-YT-Downloader.git
-   cd Audacity-YT-Downloader``
-**Install Required Dependencies:**
+On Windows, download a build from [ffmpeg.org][ffmpeg] and add the folder
+containing `ffmpeg.exe` to your `PATH`. Check it with:
 
-You can install the required Python libraries using pip:
+```bash
+ffmpeg -version
+```
 
-`pip install -r requirements.txt`
-Ensure that yt-dlp is installed (it should be listed in requirements.txt):
+**4. Enable Audacity's scripting module**
 
-`pip install yt-dlp
-Install ffmpeg` if you haven't already:
+In Audacity, go to `Edit > Preferences > Modules`, set **mod-script-pipe** to
+`Enabled`, and restart Audacity. Without this, Audacity has no way to accept the
+import command.
 
-**Windows:** Download from FFmpeg.org and add the binary to your system's PATH.
-Set Up Audacity:
+If the module is switched off when the app starts Audacity for you, it offers to
+turn it on for you.
 
-Ensure that the **mod-script-pipe** extension is enabled in Audacity. This is required for importing files directly via the Python script.
-Instructions for enabling the script pipe can be found on the Audacity wiki.
+## Usage
 
-**Set Up Apple Music:**
+Run it and paste a link when prompted:
 
-To download from Apple Music, you need to export your session cookies:
+```bash
+python main.py
+```
 
-Sign in to your Apple Music account in your browser.
-Use one of the following browser extensions to export your cookies in Netscape format:
-Firefox: Export Cookies Extension
-Chromium-based browsers: Export Cookies Extension
-Save the exported cookies file as `cookies.txt` in the same directory as the script, or provide the path using a command-line argument or configuration file.
-Note: Make sure the cookies file contains your active Apple Music session and that your subscription is valid.
+Or pass links straight in — several at a time is fine:
 
-## Run the Script:
+```bash
+python main.py "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+```
 
-You can either run the script directly from the Python terminal: `python main.py`
-Or, you can use the provided .bat file (run.bat) to easily run the script by double-clicking it. The .bat file will call the Python script from anywhere on your system.
+On Windows you can also just double-click `main-runner.bat`, or make a shortcut
+to it and put that wherever is convenient. It uses the project's `.venv` if
+there is one, and falls back to whatever `python` is on your `PATH`.
 
-### Steps to Use the Script
-Open Audacity
-Make sure that Audacity is running and the mod-script-pipe extension is enabled. You can enable this by going to: `Edit > Preferences > Modules > Enable mod-script-pipe.`
+### Examples
 
-Run the Script or .bat Shortcut
-You can run the script directly using the Python terminal or use the provided .bat file (shortcut) for quick execution. If using the .bat file, simply double-click it.
+```bash
+# A single YouTube video
+python main.py "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
-Enter the URL
+# A whole YouTube playlist
+python main.py --playlist "https://www.youtube.com/playlist?list=PLb911ot23pTQ"
 
-**For YouTube:** Enter the YouTube video or playlist URL when prompted.
+# Just the linked video, even though the URL is part of a playlist
+python main.py --no-playlist "https://www.youtube.com/watch?v=VIDEO&list=PLAYLIST"
 
-**For Apple Music:** Enter the Apple Music track or playlist URL when prompted, and ensure the cookies.txt file is in place.
+# An Apple Music album
+python main.py "https://music.apple.com/us/album/album-name/id1234567890"
 
-**Download and Import**
-The script will automatically download the MP3(s) and import them into Audacity.
+# Download only, leaving Audacity alone
+python main.py --no-import "https://youtu.be/dQw4w9WgXcQ"
+```
 
-**Move and Clean Up**
+When a YouTube link is part of a playlist and you have not said which you want,
+you are asked whether to grab the whole thing.
 
-After downloading and importing, the MP3 files will be moved to your Downloads folder. Any temporary folders used during the download process will be deleted.
+### Options
+
+| Option | What it does |
+| --- | --- |
+| `-o`, `--output DIR` | Where to save the MP3s (default: `Downloads` next to the script). |
+| `-q`, `--quality KBPS` | MP3 bitrate for YouTube downloads (default: `192`). |
+| `--playlist` / `--no-playlist` | Answer the playlist question up front. |
+| `--cookies FILE` | Apple Music cookies file (default: `cookies.txt` next to the script). |
+| `--youtube-cookies FILE` | Cookies for age-restricted YouTube videos. |
+| `--no-launch` | Never start Audacity automatically. |
+| `--no-import` | Download only; do not touch Audacity. |
+| `--no-thumbnail` | Skip embedding the video thumbnail as cover art. |
+
+Set the `AUDACITY_PATH` environment variable if Audacity is installed somewhere
+unusual and the app cannot find it.
+
+## Apple Music setup
+
+Apple Music downloads go through [gamdl], which needs your browser session:
+
+1. Sign in to <https://music.apple.com> in your browser.
+2. Export your cookies in **Netscape format** with a cookie-export extension.
+3. Save the file as `cookies.txt` next to `main.py` (or point `--cookies` at it).
+
+`cookies.txt` is a login credential — `.gitignore` keeps it out of the
+repository, and it should stay that way.
+
+## How it works
+
+1. Audacity is started if it is not already running, so it can warm up while the
+   download runs.
+2. yt-dlp (YouTube) or gamdl (Apple Music) downloads into a scratch folder, so
+   the app knows exactly which files belong to this run.
+3. Audio is converted to MP3 and tagged, then moved into your output folder.
+4. The app connects to Audacity's scripting pipes and imports each file as a new
+   track, in playlist order.
+5. The scratch folder is deleted. Your MP3s stay put.
+
+## Project layout
+
+| File | Role |
+| --- | --- |
+| `main.py` | Command line, URL routing and the interactive loop. |
+| `audacity.py` | Finds, starts and talks to Audacity. |
+| `youtubedownloader.py` | yt-dlp wrapper. |
+| `applemusicdownloader.py` | gamdl wrapper plus MP3 conversion. |
+| `utils.py` | Scratch folders, safe moves, shared errors. |
+| `main-runner.bat` | Double-click launcher for Windows. |
 
 ## Troubleshooting
-If you receive an error similar to this:
 
-`FileNotFoundError: [Errno 2] No such file or directory: '\\\\.\\pipe\\ToSrvPipe'`
-You can fix this by:
+**"Audacity does not appear to be running"** or
+`FileNotFoundError: \\.\pipe\ToSrvPipe`
 
-Restarting either the script or Audacity.
-Ensure the mod-script-pipe extension is enabled in Audacity:
-Go to `Edit > Preferences > Modules.`
-Check the box next to Enable mod-script-pipe.
+The scripting pipes are not there. Check that `mod-script-pipe` is set to
+`Enabled` under `Edit > Preferences > Modules` and restart Audacity. Only one
+script may be connected to Audacity at a time, so close any other tool using it.
 
-### Example Commands
+**"Audacity did not reply within 60 seconds"**
 
-**For a single YouTube video:**
-`python main.py https://www.youtube.com/watch?v=dQw4w9WgXcQ`
+Audacity is up but stuck on a dialog. The usual culprit is the **Automatic Crash
+Recovery** window, which blocks importing until you answer it. Deal with the
+dialog and run the command again — your MP3s are already saved.
 
-**For a YouTube playlist:**
-`python main.py https://www.youtube.com/watch?v=Uj1ykZWtPYI&list=PL9JM2aC37BG03vlqyhiYX54NG_thqqvbg`
+**YouTube returns `HTTP Error 403` or claims a video is unavailable**
 
-**For an Apple Music track:**
-`python main.py https://music.apple.com/us/album/song-title/id1234567890`
+Usually a stale yt-dlp. Update it first:
 
-**For an Apple Music playlist:**
-`python main.py https://music.apple.com/us/playlist/playlist-title/id1234567890`
+```bash
+pip install --upgrade yt-dlp
+```
+
+For age-restricted videos, export your YouTube cookies and pass
+`--youtube-cookies cookies-youtube.txt`.
+
+**Apple Music downloads fail immediately**
+
+Either `cookies.txt` has expired (export it again) or gamdl has fallen behind a
+change on Apple's website:
+
+```bash
+pip install --upgrade gamdl
+```
+
+**`ffmpeg was not found on your PATH`**
+
+Install ffmpeg and reopen your terminal so the new `PATH` takes effect.
+
+## A note on the pipes
+
+If you are poking at Audacity scripting yourself, two things bite hard and are
+worth knowing:
+
+- Do not write the commands through a text-mode file on Windows. Python turns
+  `\n` into `\r\n`, which corrupts the `\r\n\0` terminator Audacity expects, and
+  it then silently ignores the command. Write bytes instead.
+- Do not poll `os.path.exists()` on the pipe to see whether Audacity is ready.
+  On Windows, that opens a client handle on the pipe, and Audacity hands out one
+  pipe instance at a time — probe it in a loop and it drops the pipes entirely.
+  Just try to open them for real and retry on failure.
 
 ## Contributing
-If you want to contribute to this project, feel free to fork the repository, make changes, and submit a pull request. We welcome any improvements, bug fixes, or new features!
+
+Fork it, change it, open a pull request. Improvements, bug fixes and new
+features are all welcome.
 
 ## License
-This project is licensed under the MIT License - see the LICENSE file for details.
 
-## Update
-This update includes the instructions for setting up Apple Music cookies and the new Apple Music support. Let me know if you need any more changes!
+MIT — see [LICENSE](LICENSE).
 
-
-
-
-
+[Audacity]: https://www.audacityteam.org/
+[ffmpeg]: https://ffmpeg.org/
+[gamdl]: https://github.com/glomatico/gamdl

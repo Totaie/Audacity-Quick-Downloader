@@ -1,21 +1,24 @@
 @echo off
-REM Get the directory of the batch file
-set BAT_DIR=%~dp0
+setlocal
+REM Run the downloader from anywhere - a shortcut to this file works fine.
+set "SCRIPT_DIR=%~dp0"
+set "PYTHON=%SCRIPT_DIR%.venv\Scripts\python.exe"
+if not exist "%PYTHON%" set "PYTHON=python"
 
-REM Change the directory to where your virtual environment is located (relative to the batch file)
-cd /d "%BAT_DIR%.venv\Scripts"
+pushd "%SCRIPT_DIR%"
+"%PYTHON%" main.py %*
+set "EXIT_CODE=%ERRORLEVEL%"
+popd
 
-REM Activate the virtual environment
-call activate.bat
+REM Keep the window open when double clicked, or whenever something failed.
+if not "%EXIT_CODE%"=="0" goto :wait
+if "%~1"=="" goto :wait
+goto :end
 
-REM Change to the directory where your Python file is located (relative to the batch file)
-cd /d "%BAT_DIR%"
-
-REM Run the Python script
-python main.py
-
-REM Pause to keep the window open after execution
+:wait
+echo.
 pause
 
-REM Deactivate the virtual environment
-deactivate
+:end
+endlocal
+exit /b %EXIT_CODE%

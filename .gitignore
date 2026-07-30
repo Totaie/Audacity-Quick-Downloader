@@ -1,0 +1,13 @@
+# Apple Music session cookies - never commit these
+cookies.txt
+
+# Downloaded music and scratch folders
+Downloads/
+temp/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
