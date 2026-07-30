@@ -181,8 +181,13 @@ For age-restricted videos, export your YouTube cookies and pass
 
 **Apple Music downloads fail immediately**
 
-Either `cookies.txt` has expired (export it again) or gamdl has fallen behind a
-change on Apple's website:
+If the error mentions **status code 403** while fetching account info, your
+`cookies.txt` has expired — export it again as described above. Cookies are
+tied to a browser session and do not last indefinitely.
+
+If it mentions a **token** or an unexpected page, gamdl has fallen behind a
+change on Apple's website. gamdl 2.x no longer works at all, so make sure you
+are on 3.x or newer:
 
 ```bash
 pip install --upgrade gamdl

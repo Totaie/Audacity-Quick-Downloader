@@ -1,3 +1,4 @@
 # Python dependencies. ffmpeg also has to be installed and on your PATH.
+# gamdl 2.x no longer works against Apple Music.
 yt-dlp>=2024.11.18
-gamdl>=2.7.3
+gamdl>=3.8.4
