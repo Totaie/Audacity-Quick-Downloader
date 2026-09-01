@@ -79,8 +79,12 @@ python main.py "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 ```
 
 On Windows you can also just double-click `main-runner.bat`, or make a shortcut
-to it and put that wherever is convenient. It uses the project's `.venv` if
-there is one, and falls back to whatever `python` is on your `PATH`.
+to it and put that wherever is convenient. On its first run it creates the
+project's `.venv` and installs the dependencies into it, so step 2 above is
+optional if you only ever launch it that way. After that it checks once a day
+for newer `gamdl` and `yt-dlp` releases and upgrades them before running - set
+the `AQD_SKIP_UPDATE=1` environment variable to turn that off. A failed check
+is only a warning; the app still starts with whatever is already installed.
 
 ### Examples
 
