@@ -2,10 +2,12 @@
 
 import contextlib
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 # Extensions the downloaders may end up with before anything is converted.
@@ -29,6 +31,49 @@ class DownloadError(RuntimeError):
 
 class MissingDependency(DownloadError):
     """Raised when an external program the app relies on is not installed."""
+
+
+class Cancelled(DownloadError):
+    """Raised when the user cancels a download part way through."""
+
+
+# Colour codes that yt-dlp and gamdl sprinkle through their messages.
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+
+def strip_ansi(text):
+    return ANSI_ESCAPE.sub("", text)
+
+
+class Reporter:
+    """Where the downloaders send progress instead of printing it.
+
+    This base class ignores everything, so the downloaders can be used on
+    their own; the job runner passes a subclass that feeds the interface.
+    """
+
+    def __init__(self):
+        self.cancel_event = threading.Event()
+
+    @property
+    def cancelled(self):
+        return self.cancel_event.is_set()
+
+    def check_cancelled(self):
+        if self.cancelled:
+            raise Cancelled("Cancelled.")
+
+    def stage(self, text):
+        """What is happening right now, e.g. "Converting to MP3"."""
+
+    def item(self, index, total, title, collection=None):
+        """Which track is being worked on, for playlists and albums."""
+
+    def progress(self, fraction, speed=None, eta=None):
+        """How far through the current track we are (0-1, or None if unknown)."""
+
+    def log(self, text, level="info"):
+        """A line for the activity log."""
 
 
 def find_ffmpeg():
@@ -136,5 +181,23 @@ def describe_path(path):
 
 
 def python_executable():
-    """The interpreter running this script, used to shell out to gamdl."""
+    """The interpreter running this script, used to shell out to gamdl and pip."""
     return sys.executable or "python"
+
+
+def reveal(path):
+    """Show a file (selected) or a folder in the system file manager."""
+    path = Path(path)
+    try:
+        if sys.platform == "win32":
+            if path.is_file():
+                subprocess.Popen(["explorer", "/select,", str(path)])
+            else:
+                os.startfile(str(path))
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", str(path)] if path.is_file() else ["open", str(path)])
+        else:
+            subprocess.Popen(["xdg-open", str(path if path.is_dir() else path.parent)])
+    except OSError:
+        return False
+    return True

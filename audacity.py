@@ -226,29 +226,32 @@ def enable_script_pipe():
     return True
 
 
-def ensure_running(auto_launch=True, ask=None):
+def ensure_running(auto_launch=True, ask=None, log=print):
     """Make sure Audacity is up, starting it if needed.
 
     ``ask`` is an optional callable used to ask permission before changing
     Audacity's own settings. It is only consulted when mod-script-pipe is
-    turned off and Audacity is not running.
+    turned off and Audacity is not running. ``log`` receives status messages.
     """
     if is_running():
         return True
 
     if not auto_launch:
-        print("Audacity is not running and auto-start is disabled.")
+        log("Audacity is not running and auto-start is disabled.")
         return False
 
     if script_pipe_enabled() is False:
-        print("Audacity's scripting module (mod-script-pipe) is turned off.")
-        if ask and ask("Turn it on for you?") and enable_script_pipe():
-            print("Enabled mod-script-pipe in Audacity's settings.")
+        question = (
+            "Audacity's scripting module (mod-script-pipe) is turned off, so "
+            "tracks cannot be imported. Turn it on for you?"
+        )
+        if ask and ask(question) and enable_script_pipe():
+            log("Enabled mod-script-pipe in Audacity's settings.")
         else:
-            print(ENABLE_INSTRUCTIONS)
+            log(ENABLE_INSTRUCTIONS)
 
     executable = launch()
-    print(f"Started Audacity ({executable}).")
+    log(f"Started Audacity ({executable}).")
     return True
 
 
@@ -276,8 +279,9 @@ def connection_hint():
 class Audacity:
     """A live connection to Audacity's scripting pipes."""
 
-    def __init__(self, command_timeout=COMMAND_TIMEOUT):
+    def __init__(self, command_timeout=COMMAND_TIMEOUT, on_wait=None):
         self.command_timeout = command_timeout
+        self.on_wait = on_wait
         self._to_file = None
         self._from_file = None
         self._responses = queue.Queue()
@@ -298,18 +302,12 @@ class Audacity:
             except OSError as error:
                 self.close()
                 if time.monotonic() >= deadline:
-                    if waiting:
-                        print()
                     raise AudacityError(f"{connection_hint()} ({error.strerror})")
-                if not waiting:
-                    print("Waiting for Audacity", end="", flush=True)
-                    waiting = True
-                else:
-                    print(".", end="", flush=True)
+                if not waiting and self.on_wait:
+                    self.on_wait()
+                waiting = True
                 time.sleep(1.5)
 
-        if waiting:
-            print()
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
         return self
@@ -394,6 +392,9 @@ class Audacity:
         return response
 
 
-def connect(timeout=STARTUP_TIMEOUT, command_timeout=COMMAND_TIMEOUT):
-    """Return a connection to Audacity, waiting for it to start if necessary."""
-    return Audacity(command_timeout).open(timeout)
+def connect(timeout=STARTUP_TIMEOUT, command_timeout=COMMAND_TIMEOUT, on_wait=None):
+    """Return a connection to Audacity, waiting for it to start if necessary.
+
+    ``on_wait`` is called once if Audacity is not ready straight away.
+    """
+    return Audacity(command_timeout, on_wait).open(timeout)

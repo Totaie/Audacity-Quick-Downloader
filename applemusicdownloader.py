@@ -1,12 +1,23 @@
-"""Download Apple Music tracks with gamdl and convert them to MP3."""
+"""Download Apple Music tracks with gamdl and convert them to MP3.
 
+gamdl runs as a separate process with its output captured: the lines saying
+which track it is on and how far through it is are turned into progress for
+the interface, and everything else stays out of sight unless it goes wrong.
+"""
+
+import os
+import re
 import subprocess
+import sys
+import threading
 from pathlib import Path
 
 from utils import (
     AUDIO_EXTENSIONS,
+    Cancelled,
     DownloadError,
     MissingDependency,
+    Reporter,
     collect_files,
     default_downloads_dir,
     find_ffmpeg,
@@ -14,6 +25,7 @@ from utils import (
     move_into,
     python_executable,
     run_quiet,
+    strip_ansi,
     temp_workspace,
 )
 
@@ -29,6 +41,12 @@ FILE_TEMPLATES = [
     "--no-album-file-template",
     "{title}",
 ]
+
+# [INFO     12:00:00] [Track   3/12 ] Downloading "Song name"
+TRACK_LINE = re.compile(r'\[Track\s+(\d+)\s*/\s*(\d+|-)\s*\]\s+Downloading "(.*)"')
+# [download]  45.3% of 5.00MiB at 1.20MiB/s ETA 00:03, from yt-dlp inside gamdl
+PERCENT = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
+LEVEL = re.compile(r"^\[(WARNING|ERROR|CRITICAL)\b")
 
 
 def convert_to_mp3(source, destination, quality="2"):
@@ -89,8 +107,93 @@ def _gamdl_command(url, destination, cookies):
     ]
 
 
-def download_apple_music(url, output_dir=None, cookies=None, quality="2"):
+class _GamdlOutput:
+    """Turns gamdl's console output into reporter calls."""
+
+    def __init__(self, reporter):
+        self.reporter = reporter
+        self.tail = []  # the last few lines, to explain a failure
+
+    def feed(self, line):
+        line = strip_ansi(line).strip()
+        if not line:
+            return
+        self.tail = (self.tail + [line])[-15:]
+
+        track = TRACK_LINE.search(line)
+        if track:
+            index, total, title = track.groups()
+            self.reporter.item(int(index), int(total) if total.isdigit() else None, title)
+            self.reporter.stage("Downloading")
+            self.reporter.progress(0.0)
+            return
+
+        if line.startswith("[download]"):
+            percent = PERCENT.search(line)
+            if percent:
+                self.reporter.progress(min(float(percent.group(1)) / 100, 1.0))
+            return
+
+        level = LEVEL.match(line)
+        if level:
+            message = line.split("]", 2)[-1].strip() if "]" in line else line
+            self.reporter.log(message, "warning" if level.group(1) == "WARNING" else "error")
+
+    def explain(self):
+        errors = [line for line in self.tail if LEVEL.match(line)]
+        return (errors or self.tail or ["(no output)"])[-1]
+
+
+def _run_gamdl(command, reporter):
+    """Run gamdl, feeding its output to ``reporter``. Returns (exit code, parser)."""
+    environment = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
+    options = {}
+    if sys.platform == "win32":
+        options["creationflags"] = subprocess.CREATE_NO_WINDOW
+    try:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=environment,
+            **options,
+        )
+    except OSError as error:
+        raise DownloadError(f"Could not run gamdl: {error}")
+
+    output = _GamdlOutput(reporter)
+
+    def pump():
+        # yt-dlp redraws its progress line with carriage returns, so split
+        # on those as well as on newlines.
+        pending = b""
+        while True:
+            chunk = process.stdout.read1(4096)
+            if not chunk:
+                break
+            pending += chunk
+            *lines, pending = re.split(rb"[\r\n]", pending)
+            for line in lines:
+                output.feed(line.decode("utf-8", errors="replace"))
+        output.feed(pending.decode("utf-8", errors="replace"))
+
+    reader = threading.Thread(target=pump, daemon=True)
+    reader.start()
+    try:
+        while process.poll() is None:
+            if reporter.cancel_event.wait(0.2):
+                process.kill()
+                process.wait()
+                raise Cancelled("Cancelled.")
+    finally:
+        reader.join(timeout=5)
+    return process.returncode, output
+
+
+def download_apple_music(url, output_dir=None, cookies=None, quality="2", reporter=None):
     """Download ``url`` from Apple Music and return the MP3 paths saved on disk."""
+    reporter = reporter or Reporter()
     output_dir = Path(output_dir) if output_dir else default_downloads_dir()
     cookies = Path(cookies) if cookies else DEFAULT_COOKIES
 
@@ -105,39 +208,33 @@ def download_apple_music(url, output_dir=None, cookies=None, quality="2"):
 
     with temp_workspace(output_dir) as workspace:
         command = _gamdl_command(url, workspace, cookies)
-        try:
-            # Output is left on the console so gamdl's progress stays visible.
-            result = subprocess.run(command, check=False)
-        except OSError as error:
-            raise DownloadError(f"Could not run gamdl: {error}")
+        reporter.stage("Looking it up")
+        returncode, output = _run_gamdl(command, reporter)
 
         downloaded = collect_files(workspace, AUDIO_EXTENSIONS)
         if not downloaded:
             raise DownloadError(
-                "gamdl did not download anything (exit code "
-                f"{result.returncode}). Common causes: expired cookies.txt, a "
-                "track your subscription cannot play, or a gamdl that has "
-                "fallen behind Apple's website - try "
-                "'pip install --upgrade gamdl'."
+                f"gamdl did not download anything: {output.explain()} Common "
+                "causes: expired cookies.txt, a track your subscription cannot "
+                "play, or a gamdl that has fallen behind Apple's website."
             )
-        if result.returncode != 0:
-            print(
-                f"gamdl reported an error (exit code {result.returncode}); "
-                "importing the tracks it did manage to download."
+        if returncode != 0:
+            reporter.log(
+                f"gamdl reported an error (exit code {returncode}); importing "
+                "the tracks it did manage to download.",
+                "warning",
             )
 
         tracks = []
-        for source in downloaded:
+        for number, source in enumerate(downloaded, 1):
+            reporter.check_cancelled()
             if source.suffix.lower() == ".mp3":
                 tracks.append(move_into(source, output_dir))
                 continue
-            print(f"Converting {source.name} to MP3...")
+            reporter.item(number, len(downloaded), source.stem)
+            reporter.stage("Converting to MP3")
+            reporter.progress(None)
             mp3 = convert_to_mp3(source, source.with_suffix(".mp3"), quality=quality)
             tracks.append(move_into(mp3, output_dir))
 
         return tracks
-
-
-if __name__ == "__main__":
-    for path in download_apple_music(input("Enter Apple Music URL: ").strip()):
-        print(path)

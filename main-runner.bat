@@ -4,9 +4,9 @@ REM Run the downloader from anywhere - a shortcut to this file works fine.
 set "SCRIPT_DIR=%~dp0"
 set "VENV_DIR=%SCRIPT_DIR%.venv"
 set "PYTHON=%VENV_DIR%\Scripts\python.exe"
-set "STAMP=%VENV_DIR%\.last-update"
+set "INSTALLED=%VENV_DIR%\requirements.installed"
 
-if exist "%PYTHON%" goto :check_update
+if exist "%PYTHON%" goto :check_requirements
 
 REM --- First run: build the virtual environment ---------------------------
 set "BOOTSTRAP="
@@ -21,30 +21,23 @@ echo [setup] Creating virtual environment in "%VENV_DIR%" ...
 if errorlevel 1 goto :venv_failed
 if not exist "%PYTHON%" goto :venv_failed
 set "FRESH=1"
+goto :install
 
-REM --- Keep gamdl and yt-dlp current --------------------------------------
-:check_update
-if defined AQD_SKIP_UPDATE goto :run
-if defined FRESH goto :update
-if not exist "%STAMP%" goto :update
-set "LAST="
-set /p LAST=<"%STAMP%"
-REM Only check once a day; set AQD_SKIP_UPDATE=1 to skip it entirely.
-if "%LAST%"=="%DATE%" goto :run
-
-:update
-if defined FRESH echo [setup] Installing dependencies, this takes a minute ...
-if not defined FRESH echo [setup] Checking gamdl / yt-dlp for updates ...
-"%PYTHON%" -m pip install --upgrade --disable-pip-version-check -r "%SCRIPT_DIR%requirements.txt"
-if errorlevel 1 goto :update_failed
-> "%STAMP%" echo %DATE%
-echo.
+REM --- Install again only when requirements.txt has changed ----------------
+REM Keeping yt-dlp and gamdl current happens inside the app, in the
+REM background, so it never holds up start up.
+:check_requirements
+if not exist "%INSTALLED%" goto :install
+fc /b "%SCRIPT_DIR%requirements.txt" "%INSTALLED%" >nul 2>&1
+if errorlevel 1 goto :install
 goto :run
 
-:update_failed
-if defined FRESH goto :install_failed
-echo [setup] Update check failed - carrying on with what is installed.
-echo.
+:install
+if defined FRESH echo [setup] Installing dependencies, this takes a minute ...
+if not defined FRESH echo [setup] requirements.txt changed, installing the new dependencies ...
+"%PYTHON%" -m pip install --upgrade --disable-pip-version-check --quiet -r "%SCRIPT_DIR%requirements.txt"
+if errorlevel 1 goto :install_failed
+copy /y "%SCRIPT_DIR%requirements.txt" "%INSTALLED%" >nul
 goto :run
 
 REM --- Run it -------------------------------------------------------------
@@ -54,9 +47,8 @@ pushd "%SCRIPT_DIR%"
 set "EXIT_CODE=%ERRORLEVEL%"
 popd
 
-REM Keep the window open when double clicked, or whenever something failed.
+REM Keep the window open if something went wrong, so the error can be read.
 if not "%EXIT_CODE%"=="0" goto :wait
-if "%~1"=="" goto :wait
 goto :end
 
 :no_python
