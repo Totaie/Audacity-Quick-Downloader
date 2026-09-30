@@ -1,4 +1,4 @@
-"""Download audio as MP3 with yt-dlp: YouTube, SoundCloud, Bandcamp and more.
+"""Download audio with yt-dlp: YouTube, SoundCloud, Bandcamp and more.
 
 yt-dlp is kept quiet; its progress comes back through a :class:`Reporter`
 instead of being printed.
@@ -8,6 +8,7 @@ import re
 import shutil
 from pathlib import Path
 
+from formats import AUDIO_FORMATS
 from utils import (
     Cancelled,
     DownloadError,
@@ -23,7 +24,7 @@ from utils import (
 
 # What each yt-dlp post-processor is doing, in words.
 POSTPROCESSOR_STAGES = {
-    "ExtractAudio": "Converting to MP3",
+    "ExtractAudio": "Converting",
     "Metadata": "Tagging",
     "EmbedThumbnail": "Adding cover art",
 }
@@ -91,14 +92,18 @@ def find_deno():
         return shutil.which("deno")
 
 
-def build_options(destination, quality="192", playlist=False, cookies=None, thumbnail=True):
-    """yt-dlp options that produce tagged MP3s inside ``destination``."""
+def build_options(
+    destination, quality="192", playlist=False, cookies=None, thumbnail=True, audio_format="mp3"
+):
+    """yt-dlp options that produce tagged audio files inside ``destination``."""
+    output = AUDIO_FORMATS[audio_format]
+    extract = {"key": "FFmpegExtractAudio", "preferredcodec": output["codec"]}
+    if output["lossy"]:
+        extract["preferredquality"] = str(quality)
+    # WAV has nowhere to put cover art.
+    thumbnail = thumbnail and audio_format != "wav"
     postprocessors = [
-        {
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": str(quality),
-        },
+        extract,
         # Title/artist/album tags. The old "addmetadata" option did nothing:
         # yt-dlp only writes tags when this post-processor is present.
         {"key": "FFmpegMetadata", "add_metadata": True},
@@ -177,8 +182,9 @@ def download_audio(
     cookies=None,
     thumbnail=True,
     reporter=None,
+    audio_format="mp3",
 ):
-    """Download ``url`` and return the MP3 paths saved in ``output_dir``.
+    """Download ``url`` and return the audio files saved in ``output_dir``.
 
     Everything is downloaded into a scratch folder first so we know exactly
     which files this run produced, then moved into the output folder without
@@ -195,6 +201,7 @@ def download_audio(
             playlist=playlist,
             cookies=cookies,
             thumbnail=thumbnail,
+            audio_format=audio_format,
         )
         logger = _Logger(reporter)
         on_progress, on_postprocess = _hooks(reporter, yt_dlp)
@@ -214,7 +221,7 @@ def download_audio(
             raise DownloadError(logger.errors[-1] if logger.errors else tidy_error(strip_ansi(str(error))))
         reporter.check_cancelled()
 
-        tracks = collect_files(workspace, {".mp3"})
+        tracks = collect_files(workspace, {AUDIO_FORMATS[audio_format]["extension"]})
         if not tracks:
             if logger.errors:
                 raise DownloadError(logger.errors[-1])

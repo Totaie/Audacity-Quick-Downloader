@@ -12,11 +12,13 @@ import sys
 import time
 from pathlib import Path
 
-from applemusicdownloader import DEFAULT_COOKIES
+import audacity
 from jobs import CANCELLED, DONE, FAILED, RUNNING, Runner
+from separation import PRESETS
+from settings import AUDIO_FORMATS, BITRATES, settings_path
+from settings import load as load_settings
 from sources import identify, split_input
 from updater import Updater
-from utils import default_downloads_dir
 
 QUIT_WORDS = {"q", "quit", "exit"}
 
@@ -82,18 +84,18 @@ class PlainPrinter:
 
 def plain_add(runner, text):
     source = identify(text)
-    playlist = runner.options.playlist
+    playlist = runner.settings.playlist
     if source.ambiguous_playlist and playlist is None:
         playlist = ask_yes_no("That link is part of a playlist. Download the whole playlist?")
     return runner.add(text, playlist)
 
 
-def run_plain(options, updater):
-    runner = Runner(options, updater, ask=lambda question, default=False: ask_yes_no(question, default))
+def run_plain(settings, updater, urls):
+    runner = Runner(settings, updater, ask=lambda question, default=False: ask_yes_no(question, default))
     printer = PlainPrinter(runner)
     try:
-        if options.urls:
-            for url in options.urls:
+        if urls:
+            for url in urls:
                 for entry in split_input(url):
                     plain_add(runner, entry)
             printer.wait()
@@ -128,38 +130,28 @@ def parse_arguments(argv=None):
         prog="main.py",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=f"Saved defaults live in {settings_path()}. Change them from the "
+        "Settings screen (Ctrl+S); the options above only apply to one run.",
     )
     parser.add_argument(
         "urls",
         nargs="*",
         help="links (or song names to search for) to download straight away",
     )
+    parser.add_argument("-o", "--output", type=Path, help="where to save downloads")
     parser.add_argument(
-        "-o",
-        "--output",
-        type=Path,
-        default=default_downloads_dir(),
-        help="where to save the MP3s (default: the Downloads folder next to this script)",
+        "-f", "--format", choices=AUDIO_FORMATS, dest="audio_format", help="audio format to save"
     )
     parser.add_argument(
-        "-q",
-        "--quality",
-        default="192",
-        help="MP3 bitrate in kbps for everything except Apple Music (default: 192)",
+        "-q", "--quality", choices=BITRATES, dest="bitrate", help="bitrate in kbps for lossy formats"
     )
-    parser.add_argument(
-        "--cookies",
-        type=Path,
-        default=DEFAULT_COOKIES,
-        help="Apple Music cookies file (default: cookies.txt next to this script)",
-    )
+    parser.add_argument("--cookies", type=Path, help="Apple Music cookies file")
     parser.add_argument(
         "--site-cookies",
         "--youtube-cookies",
         dest="site_cookies",
         type=Path,
-        help="optional cookies file for yt-dlp, e.g. for age restricted YouTube "
-        "videos or SoundCloud Go+ tracks",
+        help="cookies file for yt-dlp, e.g. for age restricted YouTube videos",
     )
 
     playlist = parser.add_mutually_exclusive_group()
@@ -177,25 +169,27 @@ def parse_arguments(argv=None):
         help="download only the linked video, even if it is part of a playlist",
     )
 
-    parser.add_argument(
-        "--no-launch",
+    separate = parser.add_mutually_exclusive_group()
+    separate.add_argument(
+        "--separate",
+        dest="separate",
         action="store_true",
-        help="never start Audacity automatically",
+        default=None,
+        help="split downloads into stems with UVR5's models",
+    )
+    separate.add_argument(
+        "--no-separate", dest="separate", action="store_false", help="do not split into stems"
+    )
+    parser.add_argument("--preset", choices=PRESETS, help="which stems to split into")
+    parser.add_argument("--stems-dir", type=Path, help="where to save separated stems")
+
+    parser.add_argument("--no-launch", action="store_true", help="never start Audacity automatically")
+    parser.add_argument("--no-import", action="store_true", help="do not touch Audacity at all")
+    parser.add_argument(
+        "--no-thumbnail", action="store_true", help="do not embed the thumbnail as cover art"
     )
     parser.add_argument(
-        "--no-import",
-        action="store_true",
-        help="just download; do not touch Audacity at all",
-    )
-    parser.add_argument(
-        "--no-thumbnail",
-        action="store_true",
-        help="do not embed the thumbnail as cover art",
-    )
-    parser.add_argument(
-        "--no-update",
-        action="store_true",
-        help="do not check for newer yt-dlp and gamdl releases",
+        "--no-update", action="store_true", help="do not check for newer yt-dlp and gamdl releases"
     )
     parser.add_argument(
         "--plain",
@@ -203,6 +197,32 @@ def parse_arguments(argv=None):
         help="simple line-by-line output instead of the full screen interface",
     )
     return parser.parse_args(argv)
+
+
+def apply_arguments(settings, options):
+    """Let command line options override the saved settings, for this run only."""
+    overrides = {
+        "download_dir": options.output,
+        "audio_format": options.audio_format,
+        "bitrate": options.bitrate,
+        "apple_cookies": options.cookies,
+        "site_cookies": options.site_cookies,
+        "separate": options.separate,
+        "separation_preset": options.preset,
+        "separation_dir": options.stems_dir,
+    }
+    for name, value in overrides.items():
+        if value is not None:
+            setattr(settings, name, str(Path(value).expanduser().resolve()) if isinstance(value, Path) else value)
+    if options.playlist is not None:
+        settings.playlist_mode = "all" if options.playlist else "one"
+    if options.no_launch:
+        settings.launch_audacity = False
+    if options.no_import:
+        settings.import_to_audacity = False
+    if options.no_thumbnail:
+        settings.embed_thumbnail = False
+    return settings
 
 
 def main(argv=None):
@@ -213,7 +233,11 @@ def main(argv=None):
             stream.reconfigure(errors="replace")
 
     options = parse_arguments(argv)
-    options.output = Path(options.output).expanduser().resolve()
+    settings, first_run = load_settings()
+    if first_run:
+        # Start new users off with what their PC can actually do.
+        settings.import_to_audacity = audacity.find_audacity() is not None
+    settings = apply_arguments(settings, options)
 
     # Start checking for updates straight away; it runs in the background.
     skip_update = options.no_update or os.environ.get("AQD_SKIP_UPDATE")
@@ -228,9 +252,11 @@ def main(argv=None):
             print("Run: pip install -r requirements.txt")
             print("Falling back to plain output.\n")
         else:
-            return tui.run(options, updater, options.urls)
+            return tui.run(settings, updater, options.urls, first_run=first_run)
 
-    return run_plain(options, updater)
+    if first_run:
+        settings.save()  # plain mode has no settings screen; start from defaults
+    return run_plain(settings, updater, options.urls)
 
 
 if __name__ == "__main__":

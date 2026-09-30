@@ -41,7 +41,16 @@ and imported for you.
 - **Updates in the background.** yt-dlp and gamdl are both checked against PyPI
   at once while the app starts, and upgraded only if there is something newer.
   You can paste links while that happens.
-- **Playlists and albums**, downloaded as tagged MP3s with cover art.
+- **Stem separation with Ultimate Vocal Remover 5.** If you have [UVR5]
+  installed, songs can be split into vocals and instrumental, lead and backing
+  vocals, or drums, bass and the rest, with the stems saved in their own folder
+  and imported into Audacity too. It reuses the models you already downloaded
+  in UVR5, and runs on your NVIDIA GPU if you have one. Off by default.
+- **A settings screen** (`Ctrl+S`) for your defaults: where things are saved,
+  the audio format and bitrate, Audacity behaviour, separation presets and
+  more. They are saved per user, so an update never resets them.
+- **MP3, M4A, Opus, Ogg, FLAC or WAV**, whichever you prefer.
+- **Playlists and albums**, downloaded as tagged files with cover art.
 - **Nothing gets clobbered.** A file that would overwrite an existing download
   is saved as `Song (1).mp3` instead.
 - **Downloads survive import failures.** If Audacity cannot be reached, the
@@ -55,11 +64,17 @@ cannot be downloaded. Type the song name instead to grab it from YouTube.
 
 | What | Why |
 | --- | --- |
-| Python 3.9+ | Runs the script (developed on 3.11). |
-| [Audacity] 3.1+ | The destination (developed on 3.7). |
+| Python 3.10+ | Runs the script (developed on 3.11). |
+| [ffmpeg] on your `PATH` | Converts downloads to your chosen format. |
+| [Audacity] 3.1+ *(optional)* | Where downloads get imported (developed on 3.7). |
 | Audacity's `mod-script-pipe` module | How the script talks to Audacity. |
-| [ffmpeg] on your `PATH` | Converts downloads to MP3. |
+| [Ultimate Vocal Remover 5][UVR5] *(optional)* | Only needed for stem separation. |
+| An NVIDIA GPU *(optional)* | Makes separation much faster; the CPU works too. |
 | Apple Music subscription + `cookies.txt` | Only needed for Apple Music links. |
+
+Without Audacity the app is simply a downloader: turn off **Import into
+Audacity** in Settings and it will not try. Without UVR5 the separation options
+stay hidden.
 
 ## Installation
 
@@ -84,14 +99,118 @@ containing `ffmpeg.exe` to your `PATH`. Check it with:
 ffmpeg -version
 ```
 
-**4. Enable Audacity's scripting module**
+**4. Set up Audacity (optional)** — see [Setting up Audacity](#setting-up-audacity).
 
-In Audacity, go to `Edit > Preferences > Modules`, set **mod-script-pipe** to
-`Enabled`, and restart Audacity. Without this, Audacity has no way to accept the
-import command.
+**5. Set up stem separation (optional)** — see
+[Stem separation with UVR5](#stem-separation-with-uvr5).
 
-If the module is switched off when the app starts Audacity for you, it offers to
-turn it on for you.
+The first time the app opens it shows the Settings screen, so you can choose
+where downloads (and separated stems) are saved before you start.
+
+## Setting up Audacity
+
+1. Download Audacity from <https://www.audacityteam.org/download/> and install
+   it with the default options. The app finds it in `Program Files`
+   automatically; if you put it somewhere else, set the `AUDACITY_PATH`
+   environment variable to the full path of `Audacity.exe`.
+2. Open Audacity, go to `Edit > Preferences > Modules`, set **mod-script-pipe**
+   to `Enabled`, and restart Audacity. Without this, Audacity has no way to
+   accept the import command.
+
+   Or let the app do it: Settings shows a **Turn it on** button when the module
+   is off (close Audacity first), and it also offers when it starts Audacity for
+   you.
+3. That's it. The status bar at the bottom of the app shows whether Audacity is
+   running, and each download's card says when its tracks are in Audacity.
+
+## Stem separation with UVR5
+
+Separation splits a song into stems — vocals, instrumental, drums and so on —
+using the models from [Ultimate Vocal Remover 5][UVR5]. Stems are saved to a
+folder of their own (one sub-folder per song), and the original and/or the
+stems can be imported into Audacity.
+
+UVR5 has no command line, so the app runs its models through the
+[audio-separator] package instead of through UVR5's window. It only offers
+separation when UVR5 is installed, and it reuses the models you downloaded in
+UVR5, linking them rather than copying so they take no extra space.
+
+### 1. Install UVR5
+
+- **Windows:** download `UVR_v5.6.0_setup.exe` (or newer) from the
+  [UVR5 releases page](https://github.com/Anjok07/ultimatevocalremovergui/releases)
+  and install it with the default options.
+- **macOS:** download the `.dmg` for your Mac (Apple Silicon or Intel) from the
+  same page and drag it to Applications.
+- **Linux:** follow the install steps in the UVR5 README, then set the
+  **UVR5 folder** in Settings to where you cloned it.
+
+### 2. Models (nothing to do)
+
+The presets use the best models audio-separator can run, chosen from the
+public benchmarks on [MVSEP](https://mvsep.com/quality_checker/multisong_leaderboard).
+Any a preset needs that you do not have are downloaded the first time it is
+used (Settings tells you which, and how big). If UVR5 already has a model, its
+copy is used instead.
+
+| Preset | Stems | Best / Balanced | Fast |
+| --- | --- | --- | --- |
+| Vocals + Instrumental | Vocals, Instrumental | BS-Roformer Resurrection | MDX-Net Inst HQ 3 |
+| Instrumental + Lead + Backing vocals | Instrumental, Lead Vocals, Backing Vocals | BS-Roformer Resurrection, then BS-Roformer Karaoke | Inst HQ 3, then KARA 2 |
+| Vocals, Drums, Bass, Other | 4 stems | BS-Roformer SW (guitar and piano folded into Other) | Demucs v4 htdemucs |
+| Six stems | Vocals, Drums, Bass, Guitar, Piano, Other | BS-Roformer SW | Demucs v4 htdemucs_6s |
+| All stems | Lead and Backing Vocals, Drums, Bass, Guitar, Piano, Other | BS-Roformer SW, then BS-Roformer Karaoke | htdemucs, then KARA 2 (no guitar/piano) |
+
+Why these models (MVSEP scores, SDR in dB, higher is better):
+
+| Model | Scores | Replaces |
+| --- | --- | --- |
+| BS-Roformer "Resurrection" by unwa | vocals 11.36 | MDX-Net Inst HQ 3, htdemucs vocals (about 9–10) |
+| BS-Roformer SW (ships with UVR 5.6) | drums 14.11, bass 14.62, vocals 11.30; #1 for guitar, ahead of Logic Pro's stem splitter | Demucs v4 (drums and bass 2–3 dB lower) |
+| BS-Roformer Karaoke by anvuew | lead vocals 10.23, the best public single model | UVR_MDXNET_KARA_2 (about 5.4) |
+
+### Quality
+
+**Quality** in Settings trades speed for cleanliness:
+
+- **Best**: the models above, predicting every moment of the song 8 times
+  over (overlap 8) and averaging. On an RTX 5070 Ti a 5-minute song takes about
+  a minute for two stems.
+- **Balanced**: the same models at overlap 4, about twice as fast, and very
+  close in quality.
+- **Fast**: the classic UVR5 models. Several times quicker than the Roformer
+  models, which is what makes separation practical without an NVIDIA GPU.
+- **Automatic** (the default) picks Best when the engine has a GPU and Fast when
+  it does not.
+
+On a GPU the engine also runs in half precision (fp16), which is about 1.7×
+faster; measured against full precision, the difference was 78 dB below the
+music, which is inaudible.
+
+### 3. Set up the separation engine
+
+Open Settings (`Ctrl+S`) and, under **Stem separation**, click **Set up**. This
+installs PyTorch and audio-separator into `.venv-separator` in the app's
+folder, away from everything else:
+
+- With an **NVIDIA GPU**, it installs PyTorch with CUDA (about 3 GB). A song
+  separates in about a minute at Best quality.
+- Without one, it installs the CPU version (about 200 MB). It works, just more
+  slowly; the Fast quality level is the one to use.
+
+You can keep downloading while it installs; the status bar shows how it is
+going. **Remove** in Settings deletes it again (your UVR5 models are never
+touched).
+
+### 4. Turn it on
+
+Tick **Separate** in Settings to separate every download by default, choose a
+**Preset** and **Quality**, and pick where the stems should go with **Save stems
+to**. Stems are saved the way your downloads are: the same audio format and
+bitrate, with the song's tags (titled like `Song (Vocals)`) and cover art. The
+**Separate stems** tick box and preset list above the download list change it
+just for this session. Separations run one at a time; downloads carry on in
+parallel.
 
 ## Usage
 
@@ -120,16 +239,35 @@ thing.
 | `↓` / `↑` | Move between downloads (`Esc` goes back to the box). |
 | `C` | Cancel the selected download. |
 | `R` | Retry a failed or cancelled download. |
-| `O` | Show the downloaded file in Explorer. |
+| `O` | Show the downloaded file (or its stems) in Explorer. |
 | `Delete` | Remove a finished download from the list. |
+| `Ctrl+S` | Settings. |
 | `Ctrl+L` | Show or hide the activity log. |
 | `Ctrl+O` | Open the downloads folder. |
 | `Ctrl+R` | Clear finished downloads from the list. |
-| `Ctrl+P` | Command palette, including a choice of colour themes. |
+| `Ctrl+P` | Command palette. |
 | `Ctrl+Q` | Quit. |
 
-The **Import into Audacity**, **Playlists** and **Quality** settings apply to
-downloads added after you change them.
+The **Import into Audacity**, **Separate stems** and **Playlists** controls
+above the list change things for this session only, and apply to downloads
+added after you change them. Your saved defaults live in Settings.
+
+### Settings
+
+`Ctrl+S` opens the Settings screen. Everything in it is saved to
+`%APPDATA%\AudacityQuickDownloader\settings.json` (`~/.config/...` on Linux,
+`~/Library/Application Support/...` on macOS), so every user of a PC has their
+own, and updating the app never resets them.
+
+| Section | Settings |
+| --- | --- |
+| Downloads | Download folder, audio format (MP3, M4A, Opus, Ogg, FLAC, WAV), bitrate, playlist behaviour, cover art. |
+| Audacity | Import automatically, start Audacity automatically, turn on its scripting module. |
+| Stem separation | Set up or remove the engine, separate automatically, preset, quality, stems folder, import the original and/or the stems, GPU or CPU, UVR5's folder. Stems use the Downloads format and bitrate. |
+| Cookies | Apple Music cookies file, cookies for other sites. |
+| Appearance | Colour theme. |
+
+The **Browse…** buttons open the normal Windows folder picker.
 
 ### From the command line
 
@@ -162,11 +300,17 @@ everything has finished. Run `--plain` without links to be prompted for them.
 
 ### Options
 
+These override your saved settings for one run; they never change them.
+
 | Option | What it does |
 | --- | --- |
-| `-o`, `--output DIR` | Where to save the MP3s (default: `Downloads` next to the script). |
-| `-q`, `--quality KBPS` | MP3 bitrate for everything except Apple Music (default: `192`). |
+| `-o`, `--output DIR` | Where to save downloads. |
+| `-f`, `--format FORMAT` | `mp3`, `m4a`, `opus`, `ogg`, `flac` or `wav`. |
+| `-q`, `--quality KBPS` | Bitrate for lossy formats: `128`, `192`, `256` or `320`. |
 | `--playlist` / `--no-playlist` | Answer the playlist question up front. |
+| `--separate` / `--no-separate` | Split into stems with UVR5's models, or don't. |
+| `--preset NAME` | `vocals_instrumental`, `lead_backing`, `four_stems`, `all_stems` or `six_stems`. |
+| `--stems-dir DIR` | Where to save separated stems. |
 | `--cookies FILE` | Apple Music cookies file (default: `cookies.txt` next to the script). |
 | `--site-cookies FILE` | Cookies for yt-dlp, e.g. for age-restricted YouTube videos. `--youtube-cookies` still works too. |
 | `--no-launch` | Never start Audacity automatically. |
@@ -176,8 +320,8 @@ everything has finished. Run `--plain` without links to be prompted for them.
 | `--plain` | Simple line-by-line output instead of the full screen interface. |
 
 Set the `AUDACITY_PATH` environment variable if Audacity is installed somewhere
-unusual and the app cannot find it, or `AQD_SKIP_UPDATE=1` to turn the update
-check off for good.
+unusual and the app cannot find it, `UVR_PATH` likewise for UVR5, or
+`AQD_SKIP_UPDATE=1` to turn the update check off for good.
 
 ### Updates
 
@@ -217,11 +361,15 @@ repository, and it should stay that way.
 3. yt-dlp or gamdl downloads into a scratch folder, so the app knows exactly
    which files belong to this download. Their output is captured and turned
    into the progress bar instead of being printed.
-4. Audio is converted to MP3 and tagged, then moved into your output folder.
-5. The app connects to Audacity's scripting pipes and imports each file as a new
-   track, in playlist order. Downloads that finish together take turns, since
-   Audacity only has one scripting connection.
-6. The scratch folder is deleted. Your MP3s stay put.
+4. Audio is converted to your chosen format and tagged, then moved into your
+   downloads folder. The scratch folder is deleted.
+5. If separation is on, the song is split into stems by a separate process
+   running in `.venv-separator`, one song at a time, into
+   `<stems folder>\<song name>\<song name> (Vocals).mp3` and so on, in your
+   chosen format.
+6. The app connects to Audacity's scripting pipes and imports the original
+   and/or the stems as new tracks, in playlist order. Downloads that finish
+   together take turns, since Audacity only has one scripting connection.
 
 ## Project layout
 
@@ -229,16 +377,43 @@ repository, and it should stay that way.
 | --- | --- |
 | `main.py` | Command line, and the plain line-by-line mode. |
 | `tui.py` | The full screen interface, built with [Textual]. |
-| `jobs.py` | The download queue and its worker threads. |
+| `settings_screen.py` | The Settings screen. |
+| `settings.py` | Loading and saving the user's settings. |
+| `jobs.py` | The download queue, separation and importing. |
 | `sources.py` | Works out which site a link is from and what downloads it. |
 | `ytdlpdownloader.py` | yt-dlp wrapper: YouTube, SoundCloud and everything else. |
-| `applemusicdownloader.py` | gamdl wrapper plus MP3 conversion. |
+| `applemusicdownloader.py` | gamdl wrapper plus format conversion. |
+| `separation.py` | Finds UVR5, installs the separation engine, runs separations. |
+| `separator_worker.py` | Runs one separation inside `.venv-separator`. |
 | `audacity.py` | Finds, starts and talks to Audacity. |
 | `updater.py` | Background update check for yt-dlp and gamdl. |
 | `utils.py` | Scratch folders, safe moves, progress reporting, shared errors. |
 | `main-runner.bat` | Double-click launcher for Windows. |
 
 ## Troubleshooting
+
+**The separation options are missing**
+
+They only appear when UVR5 is installed. If it is installed somewhere unusual,
+set **UVR5 folder** in Settings (or the `UVR_PATH` environment variable) to the
+folder that holds `UVR.exe` and its `models` folder.
+
+**"Not separated: set up the separation engine"**
+
+The download worked, but the engine is not installed yet. Open Settings
+(`Ctrl+S`) and click **Set up** under Stem separation.
+
+**Separation is very slow**
+
+It is running on the CPU. With an NVIDIA GPU, update your graphics driver,
+set **Run on** to `GPU (NVIDIA)` in Settings and click **Reinstall**, so the
+CUDA version of PyTorch is installed. Settings shows `GPU` or `CPU` next to the
+engine once it is set up.
+
+**Separation fails with "out of memory"**
+
+Another program is using the GPU's memory, or the card is small. Close it, or
+set **Run on** to `CPU only`.
 
 **"Audacity does not appear to be running"** or
 `FileNotFoundError: \\.\pipe\ToSrvPipe`
@@ -326,3 +501,5 @@ MIT — see [LICENSE](LICENSE).
 [gamdl]: https://github.com/glomatico/gamdl
 [yt-dlp]: https://github.com/yt-dlp/yt-dlp
 [Textual]: https://textual.textualize.io/
+[UVR5]: https://github.com/Anjok07/ultimatevocalremovergui
+[audio-separator]: https://github.com/karaokenerds/python-audio-separator

@@ -1,4 +1,4 @@
-"""Download Apple Music tracks with gamdl and convert them to MP3.
+"""Download Apple Music tracks with gamdl and convert them to the chosen format.
 
 gamdl runs as a separate process with its output captured: the lines saying
 which track it is on and how far through it is are turned into progress for
@@ -12,6 +12,7 @@ import sys
 import threading
 from pathlib import Path
 
+from formats import AUDIO_FORMATS, convert_audio
 from utils import (
     AUDIO_EXTENSIONS,
     Cancelled,
@@ -24,7 +25,6 @@ from utils import (
     module_available,
     move_into,
     python_executable,
-    run_quiet,
     strip_ansi,
     temp_workspace,
 )
@@ -47,39 +47,6 @@ TRACK_LINE = re.compile(r'\[Track\s+(\d+)\s*/\s*(\d+|-)\s*\]\s+Downloading "(.*)
 # [download]  45.3% of 5.00MiB at 1.20MiB/s ETA 00:03, from yt-dlp inside gamdl
 PERCENT = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
 LEVEL = re.compile(r"^\[(WARNING|ERROR|CRITICAL)\b")
-
-
-def convert_to_mp3(source, destination, quality="2"):
-    """Convert a downloaded track to MP3, keeping its tags and cover art."""
-    ffmpeg = find_ffmpeg()
-    base = [ffmpeg, "-y", "-loglevel", "error", "-i", str(source)]
-    encode = [
-        "-codec:a",
-        "libmp3lame",
-        "-qscale:a",
-        str(quality),
-        "-map_metadata",
-        "0",
-        "-id3v2_version",
-        "3",
-        str(destination),
-    ]
-
-    # First try keeps the embedded cover art; the fallback drops anything the
-    # MP3 container cannot hold (music videos, odd side streams).
-    attempts = [
-        base + ["-map", "0", "-codec:v", "copy"] + encode,
-        base + ["-map", "0:a"] + encode,
-    ]
-
-    last_output = ""
-    for command in attempts:
-        result = run_quiet(command)
-        if result.returncode == 0 and Path(destination).exists():
-            return Path(destination)
-        last_output = (result.stdout or "").strip()
-
-    raise DownloadError(f"ffmpeg could not convert {Path(source).name}: {last_output}")
 
 
 def _gamdl_command(url, destination, cookies):
@@ -191,8 +158,14 @@ def _run_gamdl(command, reporter):
     return process.returncode, output
 
 
-def download_apple_music(url, output_dir=None, cookies=None, quality="2", reporter=None):
-    """Download ``url`` from Apple Music and return the MP3 paths saved on disk."""
+def download_apple_music(
+    url, output_dir=None, cookies=None, reporter=None, audio_format="mp3", bitrate="192"
+):
+    """Download ``url`` from Apple Music and return the audio files saved on disk.
+
+    gamdl saves AAC in .m4a files, which are kept as they are when M4A is the
+    chosen format and converted otherwise.
+    """
     reporter = reporter or Reporter()
     output_dir = Path(output_dir) if output_dir else default_downloads_dir()
     cookies = Path(cookies) if cookies else DEFAULT_COOKIES
@@ -228,13 +201,13 @@ def download_apple_music(url, output_dir=None, cookies=None, quality="2", report
         tracks = []
         for number, source in enumerate(downloaded, 1):
             reporter.check_cancelled()
-            if source.suffix.lower() == ".mp3":
+            if source.suffix.lower() == AUDIO_FORMATS[audio_format]["extension"]:
                 tracks.append(move_into(source, output_dir))
                 continue
             reporter.item(number, len(downloaded), source.stem)
-            reporter.stage("Converting to MP3")
+            reporter.stage(f"Converting to {AUDIO_FORMATS[audio_format]['label'].split()[0]}")
             reporter.progress(None)
-            mp3 = convert_to_mp3(source, source.with_suffix(".mp3"), quality=quality)
-            tracks.append(move_into(mp3, output_dir))
+            converted = convert_audio(source, audio_format, bitrate)
+            tracks.append(move_into(converted, output_dir))
 
         return tracks

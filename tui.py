@@ -11,7 +11,6 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
-    Checkbox,
     Footer,
     Header,
     Input,
@@ -22,17 +21,17 @@ from textual.widgets import (
 )
 
 import audacity
+import separation
 from jobs import CANCELLED, DONE, FAILED, QUEUED, RUNNING, Runner
+from settings_screen import SettingsScreen, Toggle
 from sources import SITE_COLORS, identify, split_input
 from utils import describe_path, reveal
 
-THEME = "tokyo-night"
 REFRESH_INTERVAL = 1 / 8
 AUDACITY_POLL_INTERVAL = 4
 
 PLAYLIST_CHOICES = [("Ask", "ask"), ("Whole playlist", "all"), ("Just the track", "one")]
-PLAYLIST_VALUES = {"ask": None, "all": True, "one": False}
-QUALITY_CHOICES = [(f"{kbps} kbps", kbps) for kbps in ("128", "192", "256", "320")]
+PRESET_CHOICES = [(preset.short, key) for key, preset in separation.PRESETS.items()]
 
 LOG_STYLES = {
     "info": "",
@@ -89,12 +88,6 @@ class UrlInput(Input):
         # the text goes in twice.
         event.prevent_default()
         event.stop()
-
-
-class Toggle(Checkbox):
-    """A checkbox that shows a tick rather than an X when it is on."""
-
-    BUTTON_INNER = "✓"
 
 
 class ConfirmScreen(ModalScreen):
@@ -168,7 +161,7 @@ class JobCard(Vertical, can_focus=True):
         if action == "retry":
             return self.job.state in (FAILED, CANCELLED)
         if action == "reveal":
-            return bool(self.job.files)
+            return bool(self.job.files or self.job.stems)
         if action == "remove":
             return finished
         return True
@@ -234,6 +227,8 @@ class JobCard(Vertical, can_focus=True):
                 parts.append(track)
             elif job.source.kind == "search":
                 parts.append(f"Search: {job.text}")
+            if job.step:
+                parts.append(job.step)
             speed = format_speed(job.speed)
             if speed:
                 parts.append(speed)
@@ -261,7 +256,10 @@ class JobCard(Vertical, can_focus=True):
         self.app.refresh_jobs()
 
     def action_reveal(self):
-        if self.job.files:
+        # Separated songs are more useful to see as their stems folder.
+        if self.job.stems:
+            reveal(self.job.stems[0])
+        elif self.job.files:
             reveal(self.job.files[0])
 
     def action_remove(self):
@@ -300,17 +298,17 @@ class DownloaderApp(App):
     }
     #options > * {
         width: auto;
-        margin-right: 2;
+        margin-right: 1;
     }
     #options .label {
         color: $text-muted;
         margin-right: 1;
     }
     #options Select {
-        width: 20;
+        width: 18;
     }
-    #options #quality {
-        width: 14;
+    #options #preset {
+        width: 26;
     }
     #options #folder {
         color: $text-muted;
@@ -458,15 +456,18 @@ class DownloaderApp(App):
         Binding("ctrl+l", "toggle_log", "Log"),
         Binding("ctrl+o", "open_folder", "Open folder"),
         Binding("ctrl+r", "clear_finished", "Clear finished"),
+        Binding("ctrl+s", "settings", "Settings"),
         Binding("escape", "focus_input", "Back to input", show=False),
     ]
 
-    def __init__(self, options, updater, initial_urls=()):
+    def __init__(self, settings, updater, initial_urls=(), first_run=False):
         super().__init__()
-        self.options = options
+        self.settings = settings
         self.updater = updater
         self.initial_urls = list(initial_urls)
-        self.runner = Runner(options, updater, ask=self.ask_from_thread)
+        self.first_run = first_run
+        self.runner = Runner(settings, updater, ask=self.ask_from_thread)
+        self.engine_installer = None
         self.cards = {}
         self.announced = set()
         self.update_announced = False
@@ -482,32 +483,25 @@ class DownloaderApp(App):
             )
             url.border_title = "Paste a link or type a song name"
             yield url
-            playlist_default = {None: "ask", True: "all", False: "one"}[self.options.playlist]
-            quality = self.options.quality if self.options.quality in ("128", "192", "256", "320") else "192"
             with Horizontal(id="options"):
-                yield Toggle(
-                    "Import into Audacity",
-                    value=not self.options.no_import,
+                yield Toggle("Import into Audacity", self.settings.import_to_audacity, id="import")
+                yield Toggle("Separate stems", self.settings.separate, id="separate")
+                yield Select(
+                    PRESET_CHOICES,
+                    value=self.settings.separation_preset,
+                    allow_blank=False,
                     compact=True,
-                    id="import",
+                    id="preset",
                 )
                 yield Static("Playlists", classes="label")
                 yield Select(
                     PLAYLIST_CHOICES,
-                    value=playlist_default,
+                    value=self.settings.playlist_mode,
                     allow_blank=False,
                     compact=True,
                     id="playlist",
                 )
-                yield Static("Quality", classes="label")
-                yield Select(
-                    QUALITY_CHOICES,
-                    value=quality,
-                    allow_blank=False,
-                    compact=True,
-                    id="quality",
-                )
-                yield Static(f"→ {describe_path(self.options.output)}", id="folder")
+                yield Static(id="folder")
         with VerticalScroll(id="jobs"):
             yield Static(WELCOME, id="empty")
         log = RichLog(id="log", wrap=True, markup=False, max_lines=500)
@@ -515,13 +509,12 @@ class DownloaderApp(App):
         yield log
         with Horizontal(id="status"):
             yield Static(id="audacity")
+            yield Static(id="uvr")
             yield Static(id="updates")
             yield Static(id="counts")
         yield Footer()
 
     def on_mount(self):
-        if THEME in self.available_themes:
-            self.theme = THEME
         self.sub_title = "YouTube · SoundCloud · Bandcamp · Apple Music · and more"
         # Kept rather than looked up each tick: the timers can fire while the
         # app is closing, after the widgets have gone.
@@ -531,6 +524,8 @@ class DownloaderApp(App):
         self.counts_view = self.query_one("#counts", Static)
         self.updates_view = self.query_one("#updates", Static)
         self.audacity_view = self.query_one("#audacity", Static)
+        self.uvr_view = self.query_one("#uvr", Static)
+        self.show_settings()
         self.query_one("#url").focus()
         self.set_interval(REFRESH_INTERVAL, self.refresh_jobs)
         self.set_interval(AUDACITY_POLL_INTERVAL, self.poll_audacity)
@@ -538,6 +533,8 @@ class DownloaderApp(App):
         self.show_audacity(None)
         for url in self.initial_urls:
             self.queue(url)
+        if self.first_run:
+            self.action_settings()
 
     # -- adding downloads -----------------------------------------------------
 
@@ -550,7 +547,7 @@ class DownloaderApp(App):
 
     def queue(self, text):
         source = identify(text)
-        if source.ambiguous_playlist and self.options.playlist is None:
+        if source.ambiguous_playlist and self.settings.playlist is None:
 
             def answered(whole):
                 self.runner.add(text, playlist=whole)
@@ -572,17 +569,84 @@ class DownloaderApp(App):
 
     # -- options --------------------------------------------------------------
 
+    # These change the current session; Settings (Ctrl+S) changes the defaults.
+
     @on(Toggle.Changed, "#import")
     def import_changed(self, event):
-        self.options.no_import = not event.value
+        self.settings.import_to_audacity = event.value
+
+    @on(Toggle.Changed, "#separate")
+    def separate_changed(self, event):
+        self.settings.separate = event.value
+        self.query_one("#preset").disabled = not event.value
+        if event.value and separation.engine_info() is None:
+            self.notify(
+                "Set up the separation engine in Settings (Ctrl+S) first, or downloads "
+                "will not be separated.",
+                title="Separation engine not installed",
+                severity="warning",
+            )
+
+    @on(Select.Changed, "#preset")
+    def preset_changed(self, event):
+        self.settings.separation_preset = event.value
 
     @on(Select.Changed, "#playlist")
     def playlist_changed(self, event):
-        self.options.playlist = PLAYLIST_VALUES[event.value]
+        self.settings.playlist_mode = event.value
 
-    @on(Select.Changed, "#quality")
-    def quality_changed(self, event):
-        self.options.quality = event.value
+    def show_settings(self):
+        """Make the options bar and theme match ``self.settings``."""
+        settings = self.settings
+        if settings.theme in self.available_themes:
+            self.theme = settings.theme
+        uvr = self.runner.uvr
+        separate = self.query_one("#separate", Toggle)
+        separate.display = uvr is not None
+        separate.value = settings.separate and uvr is not None
+        preset = self.query_one("#preset", Select)
+        preset.display = uvr is not None
+        preset.disabled = not separate.value
+        preset.value = settings.separation_preset
+        self.query_one("#import", Toggle).value = settings.import_to_audacity
+        self.query_one("#playlist", Select).value = settings.playlist_mode
+        self.query_one("#folder", Static).update(f"→ {describe_path(settings.downloads)}")
+        self.show_uvr()
+
+    def action_settings(self):
+        if isinstance(self.screen, SettingsScreen):
+            return
+
+        def saved(new):
+            if new is None:
+                if self.first_run:
+                    self.settings.save()  # do not greet them again next time
+                return
+            for name, value in vars(new).items():
+                setattr(self.settings, name, value)
+            self.runner.refresh_uvr()
+            self.show_settings()
+            self.notify("Settings saved.")
+
+        self.push_screen(SettingsScreen(first_run=self.first_run, detected=self.settings), saved)
+        self.first_run = False
+
+    def start_engine_install(self, device):
+        self.engine_installer = separation.EngineInstaller(device, log=self.runner.log).start()
+
+    def show_uvr(self):
+        if self.runner.uvr is None:
+            self.uvr_view.display = False
+            return
+        self.uvr_view.display = True
+        installer = self.engine_installer
+        if installer is not None and installer.state == "running":
+            percent = f" {installer.fraction:.0%}" if installer.fraction is not None else ""
+            self.uvr_view.update(f"[yellow]↻ UVR5 engine: {installer.stage}{percent}[/yellow]")
+        elif separation.engine_info():
+            self.uvr_view.update("[green]●[/green] UVR5 ready")
+        else:
+            self.uvr_view.update("[dim]◐ UVR5 found · engine not set up (Ctrl+S)[/dim]")
 
     # -- keeping the screen current -------------------------------------------
 
@@ -606,6 +670,7 @@ class DownloaderApp(App):
 
         self.empty_view.display = not jobs
         self.drain_log()
+        self.show_uvr()
         self.show_updates()
         self.show_counts()
 
@@ -701,7 +766,9 @@ class DownloaderApp(App):
 
     def show_audacity(self, running):
         widget = self.audacity_view
-        if running is None:
+        if running is False and audacity.find_audacity() is None:
+            widget.update("[dim]○ Audacity not installed[/dim]")
+        elif running is None:
             widget.update("[dim]○ Audacity …[/dim]")
         elif running:
             widget.update("[green]●[/green] Audacity running")
@@ -746,8 +813,8 @@ class DownloaderApp(App):
         self.log_view.toggle_class("-visible")
 
     def action_open_folder(self):
-        self.options.output.mkdir(parents=True, exist_ok=True)
-        reveal(self.options.output)
+        self.settings.downloads.mkdir(parents=True, exist_ok=True)
+        reveal(self.settings.downloads)
 
     def action_focus_input(self):
         self.query_one("#url").focus()
@@ -797,8 +864,8 @@ class DownloaderApp(App):
         )
 
 
-def run(options, updater, urls=()):
-    app = DownloaderApp(options, updater, urls)
+def run(settings, updater, urls=(), first_run=False):
+    app = DownloaderApp(settings, updater, urls, first_run)
     try:
         app.run()
     finally:
