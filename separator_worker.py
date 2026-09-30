@@ -7,6 +7,7 @@ line on stdout:
 
     {"event": "step", "index": 1, "label": "UVR-MDX-NET-Inst_HQ_3"}
     {"event": "progress", "fraction": 0.42}
+    {"event": "stems", "stems": {"Drums": "C:/.../Song (Drums).wav", ...}}
     {"event": "done", "stems": {"Vocals": "C:/.../Song (Vocals).wav", ...}}
     {"event": "error", "message": "..."}
 
@@ -164,6 +165,13 @@ def run(job):
         # Some presets fold stems together, e.g. guitar + piano + other.
         for ours, parts in (step.get("merge") or {}).items():
             stems[ours] = merge([stems[part] for part in parts], output_dir / f"{job['title']} ({ours}).wav")
+
+        # Hand over the stems this model finished, so the app can save and
+        # import them while the next model runs. They are not touched again.
+        finished = [ours for ours in list(step["stems"].values()) + list(step.get("merge") or {})
+                    if not ours.startswith("_")]
+        if finished:
+            emit("stems", stems={ours: str(stems[ours]) for ours in finished})
 
     # Throw away the intermediate files later steps used as their input.
     for name, path in list(stems.items()):

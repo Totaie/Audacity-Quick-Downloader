@@ -252,8 +252,10 @@ to change it for this session; your saved defaults live in Settings:
 - **Playlists**: ask, whole playlist, or just the track.
 
 When a song is both imported and separated, the song goes into Audacity as
-soon as it is downloaded so you can start working on it, and its stems follow
-as soon as they are ready.
+soon as it is downloaded so you can start working on it. Stems follow model
+by model: with **All stems**, for example, the drums, bass, guitar, piano and
+other stems are saved and imported while the vocals are still being split
+into lead and backing.
 
 | Key | What it does |
 | --- | --- |

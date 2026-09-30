@@ -290,21 +290,21 @@ class Runner:
                 import_failed = True
 
         if settings.separate:
-            def import_stems(song, stems):
-                # Each song's stems go in as soon as they are ready, rather
-                # than after a whole album has been separated.
+            def import_stems(stems):
+                # Stems go in as soon as each model has made them, while
+                # the next model is still running.
                 nonlocal imported, import_failed
                 if not (importing and settings.import_stems and stems) or import_failed:
                     return
                 try:
-                    self._import(job, stems, timeout)
+                    self._import(job, stems, timeout, quietly=True)
                     imported += len(stems)
                 except audacity.AudacityError as error:
                     self._warn(job, f"Stems not imported: {error}")
                     import_failed = True
 
             try:
-                self._separate(job, files, on_song=import_stems)
+                self._separate(job, files, on_stems=import_stems)
             except Cancelled:
                 return self._finish(job, CANCELLED, "Cancelled while separating; the songs were kept.")
             if job.stems:
@@ -354,7 +354,7 @@ class Runner:
             audio_format=settings.audio_format,
         )
 
-    def _separate(self, job, files, on_song=None):
+    def _separate(self, job, files, on_stems=None):
         """Split each downloaded file into stems. Returns {song: [stem paths]}.
 
         Problems here are warnings rather than failures: the download itself
@@ -398,6 +398,7 @@ class Runner:
                         device=settings.separation_device,
                         uvr=uvr,
                         reporter=SeparationReporter(job, self.log),
+                        on_stems=lambda batch: on_stems and on_stems(list(batch.values())),
                     )
                 except separation.SeparationError as error:
                     self._warn(job, f"{song.stem}: {error}")
@@ -408,8 +409,6 @@ class Runner:
             ordered += [path for name, path in stems.items() if name not in order]
             results[song] = ordered
             job.stems += ordered
-            if on_song and not job.cancel_event.is_set():
-                on_song(song, ordered)
         return results
 
     def _prepare_audacity(self, settings):
@@ -425,19 +424,24 @@ class Runner:
                 self.log(f"{error} Carrying on with the download anyway.", "warning")
                 return False
 
-    def _import(self, job, files, timeout):
+    def _import(self, job, files, timeout, quietly=False):
+        """Import ``files`` into Audacity.
+
+        ``quietly`` leaves the job's status and progress alone, for stems
+        imported while a separation is still showing its own progress.
+        """
+        stage = (lambda text: None) if quietly else (lambda text: self._set_stage(job, text))
         # Audacity has one scripting connection, so imports take turns.
-        self._set_stage(job, "Waiting to import" if self._import_lock.locked() else "Importing")
+        stage("Waiting to import" if self._import_lock.locked() else "Importing")
         with self._import_lock:
-            self._set_stage(job, "Importing into Audacity")
-
-            def waiting():
-                self._set_stage(job, "Waiting for Audacity to start")
-
-            with audacity.connect(timeout, on_wait=waiting) as session:
-                self._set_stage(job, "Importing into Audacity")
+            stage("Importing into Audacity")
+            with audacity.connect(timeout, on_wait=lambda: stage("Waiting for Audacity to start")) as session:
+                stage("Importing into Audacity")
                 for number, path in enumerate(files, 1):
                     session.import_file(Path(path))
-                    job.imported = number
-                    job.fraction = number / len(files)
+                    job.imported += 1
+                    if not quietly:
+                        job.fraction = number / len(files)
                     job.touch()
+        if quietly:
+            self.log(f"#{job.id} Imported {', '.join(Path(f).stem for f in files)}", "success")

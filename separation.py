@@ -13,11 +13,13 @@ in a separate process using that environment: separator_worker.py.
 
 import json
 import os
+import queue
 import re
 import shutil
 import subprocess
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -666,11 +668,14 @@ def separate(
     quality="auto",
     uvr=None,
     reporter=None,
+    on_stems=None,
 ):
     """Split ``song`` into stems in a new folder under ``output_root``.
 
     The stems are saved like the downloads are: in ``audio_format`` at
     ``bitrate``, carrying the song's tags and (with ``cover_art``) its artwork.
+    ``on_stems({name: path})`` is called (on another thread) with each batch
+    of stems as soon as they are saved, while later models are still running.
     Returns {stem name: path}, e.g. {"Vocals": ..., "Instrumental": ...}.
     """
     reporter = reporter or Reporter()
@@ -725,6 +730,13 @@ def separate(
     result = {}
     problem = []
     total = len(job["steps"])
+    # Stems waiting to be converted, one batch per model. Converting (and
+    # importing, via on_stems) happens on its own thread, so the first
+    # model's stems are ready while later models are still running.
+    ready = queue.Queue()
+    announced = set()  # stems the worker has handed over batch by batch
+    stems = {}
+    failures = []
 
     def read_events():
         for raw in process.stdout:
@@ -744,10 +756,51 @@ def separate(
                 reporter.progress(event.get("fraction"))
             elif kind == "log":
                 reporter.log(event.get("text", ""), event.get("level", "info"))
+            elif kind == "stems":
+                result.update(event.get("stems", {}))
+                announced.update(event.get("stems", {}))
+                ready.put(event.get("stems", {}))
             elif kind == "done":
                 result.update(event.get("stems", {}))
             elif kind == "error":
                 problem.append(event.get("message", "unknown error"))
+
+    def convert_batches():
+        while True:
+            batch = ready.get()
+            if batch is None:
+                return
+            names = sorted(batch, key=lambda n: STEM_ORDER.index(n) if n in STEM_ORDER else 99)
+
+            def save(name):
+                path = Path(batch[name])
+                try:
+                    saved = convert_audio(
+                        path,
+                        audio_format,
+                        bitrate,
+                        tags_from=song,
+                        title=f"{song.stem} ({name})",
+                        cover_art=cover_art,
+                    )
+                except DownloadError as error:
+                    failures.append(f"Could not save the {name} stem: {error}")
+                    return None
+                if saved != path:
+                    path.unlink(missing_ok=True)
+                return saved
+
+            # One ffmpeg per stem, side by side: a six stem batch saves in
+            # about the time one stem takes.
+            with ThreadPoolExecutor(max_workers=min(len(names), 6) or 1) as pool:
+                saved = dict(zip(names, pool.map(save, names)))
+            converted = {name: path for name, path in saved.items() if path is not None}
+            stems.update(converted)
+            if converted and on_stems and not reporter.cancelled:
+                try:
+                    on_stems(converted)
+                except Exception as error:  # an import problem must not stop separating
+                    failures.append(str(error))
 
     tail = []
 
@@ -761,39 +814,33 @@ def separate(
         threading.Thread(target=read_events, daemon=True),
         threading.Thread(target=read_errors, daemon=True),
     ]
-    for reader in readers:
-        reader.start()
+    converter = threading.Thread(target=convert_batches, daemon=True)
+    for thread in readers + [converter]:
+        thread.start()
     try:
         while process.poll() is None:
             if reporter.cancel_event.wait(0.2):
                 process.kill()
                 process.wait()
-                shutil.rmtree(output, ignore_errors=True)
                 raise Cancelled("Cancelled.")
     finally:
         for reader in readers:
             reader.join(timeout=5)
+        # Anything reported only at the end (not batch by batch) still gets saved.
+        pending = {name: path for name, path in result.items() if name not in announced}
+        if pending and not reporter.cancelled and process.returncode == 0:
+            ready.put(pending)
+        ready.put(None)
+        reporter.stage("Saving stems")
+        converter.join()
+        if reporter.cancelled and not stems:
+            shutil.rmtree(output, ignore_errors=True)
 
     if process.returncode != 0 or not result:
-        shutil.rmtree(output, ignore_errors=True)
+        if not stems:
+            shutil.rmtree(output, ignore_errors=True)
         message = problem[-1] if problem else (tail[-1] if tail else f"exit code {process.returncode}")
         raise SeparationError(f"Separation failed: {message}")
-    reporter.stage("Saving stems")
-    reporter.progress(None)
-    stems = {}
-    try:
-        for name, path in result.items():
-            path = Path(path)
-            stems[name] = convert_audio(
-                path,
-                audio_format,
-                bitrate,
-                tags_from=song,
-                title=f"{song.stem} ({name})",
-                cover_art=cover_art,
-            )
-            if stems[name] != path:
-                path.unlink(missing_ok=True)
-    except DownloadError as error:
-        raise SeparationError(f"Could not save the stems: {error}")
+    if failures:
+        raise SeparationError(failures[0])
     return stems
