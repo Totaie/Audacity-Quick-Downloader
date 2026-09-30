@@ -80,10 +80,16 @@ def find_ffmpeg():
     """Return the path to ffmpeg, or raise if it is not installed."""
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
-        raise MissingDependency(
-            "ffmpeg was not found on your PATH. Install it from https://ffmpeg.org "
-            "and make sure the folder holding ffmpeg.exe is on your PATH."
-        )
+        if sys.platform == "win32":
+            how = (
+                "Install it from https://ffmpeg.org and make sure the folder "
+                "holding ffmpeg.exe is on your PATH."
+            )
+        elif sys.platform == "darwin":
+            how = "Install it with: brew install ffmpeg"
+        else:
+            how = "Install it with your package manager (on Arch: sudo pacman -S ffmpeg)."
+        raise MissingDependency(f"ffmpeg was not found on your PATH. {how}")
     return ffmpeg
 
 

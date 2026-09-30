@@ -31,8 +31,8 @@ STEM_CHOICES = [None] + list(separation.PRESETS)  # None means off
 
 LOG_STYLES = {"info": "", "success": "green", "warning": "yellow", "error": "bold red"}
 
-HINTS = "enter add   ctrl+s settings   ctrl+o folder   ctrl+l log   ctrl+q quit"
-JOB_HINTS = "c cancel   r retry   o show   del remove   esc back"
+HINTS = "ctrl+s settings  ctrl+o folder  ctrl+q quit"
+JOB_HINTS = "c cancel  r retry  o show  del remove  esc back"
 
 WELCOME = """\
 [b]Drop in a link to get started[/b]
@@ -215,8 +215,9 @@ class JobCard(Vertical, can_focus=True):
 
     def _detail_text(self):
         job = self.job
-        color = SITE_COLORS.get(job.source.name)
-        text = Text(job.source.name, style=color or "dim")
+        # Only the site's name gets its brand colour, not the whole line.
+        text = Text()
+        text.append(job.source.name, style=SITE_COLORS.get(job.source.name) or "dim")
 
         def add(part, style="dim"):
             if part:

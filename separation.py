@@ -309,7 +309,15 @@ def find_uvr(override=""):
     elif sys.platform == "darwin":
         candidates.append(("/Applications/Ultimate Vocal Remover.app", ""))
     else:
-        candidates.append((Path.home() / "ultimatevocalremovergui", ""))
+        # On Linux UVR5 runs from a checkout of its source, wherever it was cloned.
+        for folder in (
+            Path.home() / "ultimatevocalremovergui",
+            Path.home() / "Ultimate Vocal Remover",
+            Path.home() / ".local" / "share" / "ultimatevocalremovergui",
+            Path("/opt/ultimatevocalremovergui"),
+            Path("/opt/Ultimate Vocal Remover"),
+        ):
+            candidates.append((folder, ""))
 
     for path, version in candidates:
         path = Path(path).expanduser()

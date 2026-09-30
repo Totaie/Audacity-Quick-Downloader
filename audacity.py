@@ -66,6 +66,9 @@ def find_audacity():
     elif sys.platform == "darwin":
         candidates.append(Path("/Applications/Audacity.app/Contents/MacOS/Audacity"))
     else:
+        # The distribution's package (pacman -S audacity on Arch). The Flatpak
+        # and Snap builds are sandboxed, so their scripting pipes are not
+        # reachable from outside and they are deliberately not looked for.
         candidates.append(Path("/usr/bin/audacity"))
         candidates.append(Path("/usr/local/bin/audacity"))
 
@@ -156,7 +159,13 @@ def config_path():
             / "audacity"
             / "audacity.cfg"
         )
-    return Path.home() / ".audacity-data" / "audacity.cfg"
+    # Audacity 3.2+ uses ~/.config/audacity, unless the older
+    # ~/.audacity-data folder is already there.
+    legacy = Path.home() / ".audacity-data" / "audacity.cfg"
+    if legacy.parent.is_dir():
+        return legacy
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    return config_home / "audacity" / "audacity.cfg"
 
 
 def _read_config():
@@ -276,6 +285,25 @@ def connection_hint():
 # --------------------------------------------------------------------------
 
 
+def _open_pipes():
+    """Open (to Audacity, from Audacity), or raise OSError if it is not ready."""
+    if sys.platform == "win32":
+        return open(TO_PIPE, "wb", buffering=0), open(FROM_PIPE, "rb", buffering=0)
+
+    # On Linux and macOS the pipes are FIFOs, which outlive an Audacity that
+    # crashed. A plain open() of one nobody is reading blocks forever, so the
+    # write end is opened non-blocking first: that fails at once (ENXIO)
+    # unless Audacity is there, waiting for us.
+    descriptor = os.open(TO_PIPE, os.O_WRONLY | os.O_NONBLOCK)
+    os.set_blocking(descriptor, True)
+    to_file = os.fdopen(descriptor, "wb", buffering=0)
+    try:
+        return to_file, open(FROM_PIPE, "rb", buffering=0)
+    except OSError:
+        to_file.close()
+        raise
+
+
 class Audacity:
     """A live connection to Audacity's scripting pipes."""
 
@@ -296,8 +324,7 @@ class Audacity:
 
         while True:
             try:
-                self._to_file = open(TO_PIPE, "wb", buffering=0)
-                self._from_file = open(FROM_PIPE, "rb", buffering=0)
+                self._to_file, self._from_file = _open_pipes()
                 break
             except OSError as error:
                 self.close()

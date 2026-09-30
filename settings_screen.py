@@ -1,6 +1,7 @@
 """The Settings screen: every saved default in one place (Ctrl+S)."""
 
 import copy
+import sys
 from dataclasses import fields
 from pathlib import Path
 
@@ -62,14 +63,23 @@ class Toggle(Checkbox):
         return super()._button
 
 
+class PickerUnavailable(Exception):
+    """There is no graphical folder picker (no Tk, or no display)."""
+
+
 def ask_path(kind, initial, title):
-    """Show the system's folder or file picker. Runs in a worker thread."""
+    """Show the system's folder or file picker. Runs in a worker thread.
+
+    Returns the chosen path, or None if the picker was cancelled.
+    """
     try:
         import tkinter
         from tkinter import filedialog
-    except ImportError:
-        return None
-    root = tkinter.Tk()
+
+        root = tkinter.Tk()
+    except (ImportError, RuntimeError) as error:
+        # tkinter.TclError (no display, e.g. over SSH) is a RuntimeError.
+        raise PickerUnavailable(str(error))
     root.withdraw()
     root.attributes("-topmost", True)
     try:
@@ -458,7 +468,16 @@ class SettingsScreen(Screen):
                  "uvr_path": "Ultimate Vocal Remover's folder"}.get(name, "Choose a file")
 
         def pick():
-            path = ask_path(kind, initial if kind == "folder" else Path(initial).parent, title)
+            try:
+                path = ask_path(kind, initial if kind == "folder" else Path(initial).parent, title)
+            except PickerUnavailable:
+                hint = " On Arch: sudo pacman -S tk" if sys.platform.startswith("linux") else ""
+                self.app.call_from_thread(
+                    self.notify,
+                    f"No folder picker is available here, so type the path instead.{hint}",
+                    severity="warning",
+                )
+                return
             if path:
                 self.app.call_from_thread(setattr, field, "value", path)
 

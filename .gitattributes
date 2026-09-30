@@ -1,0 +1,8 @@
+# Shell scripts must keep Unix line endings, or Linux cannot run them
+# ("bad interpreter"), even when committed from Windows.
+*.sh text eol=lf
+
+# And the Windows launcher keeps Windows ones.
+*.bat text eol=crlf
+
+*.png binary

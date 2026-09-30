@@ -7,22 +7,9 @@ sites — and it lands in Audacity as a new track. No sketchy "YouTube to MP3"
 websites, no manual file juggling: the MP3 is saved to your `Downloads` folder
 and imported for you.
 
-```
- ╭─ Paste a link or type a song name ──────────────────────────────────────╮
- │ https://soundcloud.com/…                                                │
- ╰─────────────────────────────────────────────────────────────────────────╯
-  ✓ Import into Audacity   Playlists Ask ▾   Quality 192 kbps ▾   → Downloads
- ╭─────────────────────────────────────────────────────────────────────────╮
- │ SoundCloud  Flickermood                                     Downloading │
- │ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━   64% │
- │ 1.2 MB/s · 0:03 left                                                    │
- ╰─────────────────────────────────────────────────────────────────────────╯
- ╭─────────────────────────────────────────────────────────────────────────╮
- │ YouTube  Never Gonna Give You Up                          ✓ In Audacity │
- │ Saved 1 file to Downloads and imported into Audacity.  (0:08)           │
- ╰─────────────────────────────────────────────────────────────────────────╯
-  ● Audacity running   yt-dlp 2026.8.19 ✓   gamdl 3.9.1 ✓       1 downloading
-```
+![Downloads in progress: one downloading, one separating into stems, one finished in Audacity](docs/screenshots/main.png)
+
+Runs on **Windows** and **Linux** (made on Arch, works on any distribution).
 
 ## Features
 
@@ -66,7 +53,7 @@ cannot be downloaded. Type the song name instead to grab it from YouTube.
 
 | What | Why |
 | --- | --- |
-| Python 3.10+ | Runs the script (developed on 3.11). |
+| Python 3.10+ | Runs the script (developed on 3.11; Arch's current Python works). |
 | [ffmpeg] on your `PATH` | Converts downloads to your chosen format. |
 | [Audacity] 3.1+ *(optional)* | Where downloads get imported (developed on 3.7). |
 | Audacity's `mod-script-pipe` module | How the script talks to Audacity. |
@@ -80,41 +67,84 @@ stay hidden.
 
 ## Installation
 
+### Windows
+
 **1. Clone the repository**
 
 ```bash
-git clone https://github.com/Totaie/Audacity-YT-Downloader.git
+git clone https://github.com/Totaie/Audacity-Quick-Downloader.git
 ```
 
-**2. Install the Python dependencies**
+**2. Install ffmpeg**
+
+Download a build from [ffmpeg.org][ffmpeg] and add the folder containing
+`ffmpeg.exe` to your `PATH`. Check it with `ffmpeg -version`.
+
+**3. Run `main-runner.bat`**
+
+Double-click it (or a shortcut to it). The first run creates the project's
+`.venv` and installs the Python dependencies into it; after that it opens
+straight away. To manage it yourself instead, `pip install -r requirements.txt`
+and run `python main.py`.
+
+### Arch Linux
+
+**1. Install the system packages**
 
 ```bash
-pip install -r requirements.txt
+sudo pacman -S --needed git python ffmpeg tk audacity
 ```
 
-**3. Install ffmpeg**
+`tk` gives Settings its folder picker, and `audacity` is optional (see
+[Setting up Audacity](#setting-up-audacity)). Use the pacman Audacity rather
+than the Flatpak or Snap one: those are sandboxed, and the app cannot reach
+their scripting pipes. For stem separation on an NVIDIA GPU you also want the
+NVIDIA driver (`nvidia` or `nvidia-open`, with `nvidia-utils`).
 
-On Windows, download a build from [ffmpeg.org][ffmpeg] and add the folder
-containing `ffmpeg.exe` to your `PATH`. Check it with:
+**2. Clone the repository and run it**
 
 ```bash
-ffmpeg -version
+git clone https://github.com/Totaie/Audacity-Quick-Downloader.git
+cd Audacity-Quick-Downloader
+./main-runner.sh
 ```
 
-**4. Set up Audacity (optional)** — see [Setting up Audacity](#setting-up-audacity).
+`main-runner.sh` does what the `.bat` does on Windows: the first run creates
+`.venv` and installs the Python dependencies, later runs only reinstall when
+`requirements.txt` changes, and links, song names, files or folders given as
+arguments are queued (`./main-runner.sh "https://youtu.be/..."`). Symlink it
+into your `PATH` to run it from anywhere:
 
-**5. Set up stem separation (optional)** — see
-[Stem separation with UVR5](#stem-separation-with-uvr5).
+```bash
+ln -s "$PWD/main-runner.sh" ~/.local/bin/quick-downloader
+```
+
+Started from a file manager or app launcher rather than a terminal, it reopens
+itself in one (it tries `$TERMINAL`, then kitty, Alacritty, foot, WezTerm,
+Konsole, GNOME Terminal, Xfce Terminal and xterm).
+
+Other distributions work the same way; only the package names differ (for
+example `sudo apt install python3 python3-venv python3-tk ffmpeg audacity` on
+Debian and Ubuntu).
+
+### Then
+
+- **Audacity (optional)**: see [Setting up Audacity](#setting-up-audacity).
+- **Stem separation (optional)**: see [Stem separation with UVR5](#stem-separation-with-uvr5).
 
 The first time the app opens it shows the Settings screen, so you can choose
 where downloads (and separated stems) are saved before you start.
 
 ## Setting up Audacity
 
-1. Download Audacity from <https://www.audacityteam.org/download/> and install
-   it with the default options. The app finds it in `Program Files`
-   automatically; if you put it somewhere else, set the `AUDACITY_PATH`
-   environment variable to the full path of `Audacity.exe`.
+1. **Windows:** download Audacity from <https://www.audacityteam.org/download/>
+   and install it with the default options. The app finds it in
+   `Program Files` automatically.
+
+   **Arch Linux:** `sudo pacman -S audacity`. The app finds `/usr/bin/audacity`.
+
+   If you put it somewhere else, set the `AUDACITY_PATH` environment variable
+   to the full path of the Audacity program.
 2. Open Audacity, go to `Edit > Preferences > Modules`, set **mod-script-pipe**
    to `Enabled`, and restart Audacity. Without this, Audacity has no way to
    accept the import command.
@@ -122,8 +152,8 @@ where downloads (and separated stems) are saved before you start.
    Or let the app do it: Settings shows a **Turn it on** button when the module
    is off (close Audacity first), and it also offers when it starts Audacity for
    you.
-3. That's it. The status bar at the bottom of the app shows whether Audacity is
-   running, and each download's card says when its tracks are in Audacity.
+3. That's it. The dot in the top right of the app shows whether Audacity is
+   running, and each download says when its tracks are in Audacity.
 
 ## Stem separation with UVR5
 
@@ -144,8 +174,16 @@ UVR5, linking them rather than copying so they take no extra space.
   and install it with the default options.
 - **macOS:** download the `.dmg` for your Mac (Apple Silicon or Intel) from the
   same page and drag it to Applications.
-- **Linux:** follow the install steps in the UVR5 README, then set the
-  **UVR5 folder** in Settings to where you cloned it.
+- **Linux (Arch):** UVR5 runs from its source code. Clone it into your home
+  folder and follow the Linux steps in its README to run it:
+
+  ```bash
+  git clone https://github.com/Anjok07/ultimatevocalremovergui.git ~/ultimatevocalremovergui
+  ```
+
+  The app looks for it in `~/ultimatevocalremovergui`,
+  `~/.local/share/ultimatevocalremovergui` and `/opt/ultimatevocalremovergui`;
+  anywhere else, set **UVR5 folder** in Settings (or `UVR_PATH`).
 
 ### 2. Models
 
@@ -217,17 +255,10 @@ parallel.
 
 ## Usage
 
-Run it and paste a link:
+Start it with `main-runner.bat` on Windows or `./main-runner.sh` on Linux (or
+`python main.py` in an environment you manage yourself), then paste a link:
 
-```bash
-python main.py
-```
-
-On Windows you can also just double-click `main-runner.bat`, or make a shortcut
-to it and put that wherever is convenient. On its first run it creates the
-project's `.venv` and installs the dependencies into it, so step 2 above is
-optional if you only ever launch it that way. After that it only runs pip again
-when `requirements.txt` changes, so it opens straight away.
+![The app when it first opens](docs/screenshots/start.png)
 
 ### In the app
 
@@ -288,7 +319,10 @@ own, and updating the app never resets them.
 | Cookies | Apple Music cookies file, cookies for other sites. |
 | Appearance | Colour theme. |
 
-The **Browse…** buttons open the normal Windows folder picker.
+The **Browse…** buttons open the system's folder picker (on Arch that needs
+the `tk` package; without it, type the path).
+
+![The stem separation part of Settings](docs/screenshots/settings.png)
 
 ### From the command line
 
@@ -410,6 +444,8 @@ repository, and it should stay that way.
 | `updater.py` | Background update check for yt-dlp and gamdl. |
 | `utils.py` | Scratch folders, safe moves, progress reporting, shared errors. |
 | `main-runner.bat` | Double-click launcher for Windows. |
+| `main-runner.sh` | Launcher for Linux (Arch and others). |
+| `docs/screenshots/` | The pictures in this README. |
 
 ## Troubleshooting
 
@@ -497,8 +533,8 @@ Install ffmpeg and reopen your terminal so the new `PATH` takes effect.
 
 ## A note on the pipes
 
-If you are poking at Audacity scripting yourself, two things bite hard and are
-worth knowing:
+If you are poking at Audacity scripting yourself, a few things bite hard and
+are worth knowing:
 
 - Do not write the commands through a text-mode file on Windows. Python turns
   `\n` into `\r\n`, which corrupts the `\r\n\0` terminator Audacity expects, and
@@ -507,6 +543,10 @@ worth knowing:
   On Windows, that opens a client handle on the pipe, and Audacity hands out one
   pipe instance at a time — probe it in a loop and it drops the pipes entirely.
   Just try to open them for real and retry on failure.
+- On Linux the pipes are FIFOs in `/tmp`, and they outlive an Audacity that
+  crashed. A plain `open()` for writing on one nobody is reading blocks
+  forever. Open the write end with `O_NONBLOCK` first: it fails straight away
+  (`ENXIO`) unless Audacity is there to read it.
 
 ## Contributing
 

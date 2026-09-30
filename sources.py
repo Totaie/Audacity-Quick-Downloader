@@ -6,10 +6,11 @@ treated as a YouTube search, and every other link is handed to yt-dlp, which
 understands well over a thousand sites.
 """
 
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 APPLE_HOSTS = {
     "music.apple.com",
@@ -90,6 +91,10 @@ SITE_COLORS = {
 }
 
 # Something with a dot and no spaces, e.g. "soundcloud.com/artist/track".
+# One pasted item: "double quoted", 'single quoted', or bare with
+# backslash-escaped spaces.
+PASTED_TOKEN = re.compile(r'"([^"]+)"|\'([^\']+)\'|((?:\\\s|\S)+)')
+
 # The start of a second link stuck to the end of the first.
 GLUED_URLS = re.compile(r"(?<=\S)(?=https?://)", re.I)
 
@@ -141,15 +146,35 @@ def _is_ambiguous_playlist(url, host):
 
 
 def local_path(text):
-    """The file or folder ``text`` names on this computer, or None."""
-    text = text.strip().strip('"').strip("'")
-    if not text or "://" in text:
+    """The file or folder ``text`` names on this computer, or None.
+
+    Accepts what terminals paste when a file is dragged in: a plain path,
+    one in single or double quotes, one with backslash-escaped spaces
+    ("My\\ Song.mp3"), or a file:// URI.
+    """
+    text = text.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        text = text[1:-1]
+    if text.lower().startswith("file://"):
+        text = unquote(urlparse(text).path)
+        if re.match(r"^/[A-Za-z]:", text):  # file:///C:/Music on Windows
+            text = text[1:]
+    elif "://" in text:
         return None
-    try:
-        path = Path(text).expanduser()
-        return path.resolve() if path.exists() else None
-    except (OSError, ValueError):
+    if not text:
         return None
+
+    candidates = [text]
+    if os.sep == "/" and "\\" in text:
+        candidates.append(re.sub(r"\\(.)", r"\1", text))
+    for candidate in candidates:
+        try:
+            path = Path(candidate).expanduser()
+            if path.exists():
+                return path.resolve()
+        except (OSError, ValueError):
+            continue
+    return None
 
 
 def local_audio(path):
@@ -214,11 +239,12 @@ def split_input(text):
     Files dragged into the terminal arrive as paths, quoted when they contain
     spaces; each file or folder becomes its own entry too.
     """
-    if local_path(text):
-        return [text.strip().strip('"').strip("'")]
-    tokens = [quoted or bare for quoted, bare in re.findall(r'"([^"]+)"|(\S+)', text)]
+    whole = local_path(text)
+    if whole:
+        return [str(whole)]
+    tokens = ["".join(match) for match in PASTED_TOKEN.findall(text)]
     if len(tokens) > 1 and all(local_path(token) or looks_like_url(token) for token in tokens):
-        return tokens
+        return [str(local_path(token) or token) for token in tokens]
 
     parts = [part for chunk in text.split() for part in GLUED_URLS.split(chunk) if part]
     if len(parts) > 1 and all(looks_like_url(part) for part in parts):
