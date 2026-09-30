@@ -511,6 +511,109 @@ def remove_engine():
 
 
 # --------------------------------------------------------------------------
+# Downloading the models ahead of time
+# --------------------------------------------------------------------------
+
+
+def all_models():
+    """Every model any preset uses, at any quality."""
+    models = []
+    for preset in PRESETS.values():
+        for quality in ("best", "fast"):
+            models += preset.models(quality)
+    return list(dict.fromkeys(models))
+
+
+def missing_models(uvr, models=None):
+    """The models that are neither downloaded nor in UVR5."""
+    return [
+        model
+        for model in (models or all_models())
+        if not (MODEL_CACHE / model).exists() and not (uvr and uvr.find_model(model))
+    ]
+
+
+class ModelDownloader:
+    """Fetches every model the presets use, in a background thread.
+
+    UVR5's copies are linked in first, so only what is really missing is
+    downloaded. The interface reads ``stage``, ``fraction`` and ``state``.
+    """
+
+    def __init__(self, uvr, log=None):
+        self.uvr = uvr
+        self.log = log or (lambda text, level="info": None)
+        self.stage = "Starting"
+        self.fraction = None
+        self.state = "running"  # then "done", "failed" or "cancelled"
+        self.error = None
+        self._process = None
+        self._cancelled = False
+
+    def start(self):
+        threading.Thread(target=self._run, name="model-download", daemon=True).start()
+        return self
+
+    def cancel(self):
+        self._cancelled = True
+        if self._process and self._process.poll() is None:
+            self._process.kill()
+
+    def _run(self):
+        try:
+            _link_models(all_models(), self.uvr)
+            missing = missing_models(self.uvr)
+            if missing:
+                self._download(missing)
+            self.state = "cancelled" if self._cancelled else "done"
+            self.stage = "Cancelled" if self._cancelled else "Downloaded"
+            if not self._cancelled:
+                self.log("Separation models downloaded.", "success")
+        except Exception as error:
+            self.state, self.stage, self.error = "failed", "Failed", str(error)
+            self.log(f"Downloading the separation models failed: {error}", "error")
+
+    def _download(self, models):
+        MODEL_CACHE.mkdir(parents=True, exist_ok=True)
+        self._process = subprocess.Popen(
+            [str(engine_python()), str(WORKER), "--download", str(MODEL_CACHE), *models],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1"),
+            **_no_window(),
+        )
+        tail = []
+
+        def read_errors():
+            for raw in self._process.stderr:
+                line = strip_ansi(raw.decode("utf-8", errors="replace")).strip()
+                if line:
+                    tail[:] = (tail + [line])[-10:]
+
+        errors = threading.Thread(target=read_errors, daemon=True)
+        errors.start()
+        failure = None
+        for raw in self._process.stdout:
+            try:
+                event = json.loads(raw.decode("utf-8", errors="replace"))
+            except ValueError:
+                continue
+            if event.get("event") == "step":
+                size = MODEL_SIZES_MB.get(models[event["index"] - 1])
+                self.stage = f"{event['label']} ({event['index']}/{len(models)}" + (f", {size} MB)" if size else ")")
+                self.fraction = 0.0
+            elif event.get("event") == "progress":
+                self.fraction = event.get("fraction")
+            elif event.get("event") == "error":
+                failure = event.get("message")
+        self._process.wait()
+        errors.join(timeout=5)
+        if self._process.returncode != 0 and not self._cancelled:
+            raise SeparationError(failure or (tail[-1] if tail else f"exit code {self._process.returncode}"))
+
+
+# --------------------------------------------------------------------------
 # Running a separation
 # --------------------------------------------------------------------------
 

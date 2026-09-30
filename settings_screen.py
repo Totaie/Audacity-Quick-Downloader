@@ -10,7 +10,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
-from textual.widgets import Button, Checkbox, Footer, Header, Input, ProgressBar, Select, Static
+from textual.widgets import Button, Checkbox, Input, ProgressBar, Select, Static
 
 import audacity
 import separation
@@ -145,8 +145,18 @@ class SettingsScreen(Screen):
     .row > Input {{
         width: 1fr;
     }}
+    #settings-top {{
+        height: 1;
+        margin: 1 3;
+    }}
+    #settings-title {{
+        width: 1fr;
+    }}
+    #settings-keys {{
+        width: auto;
+    }}
     .row > Select {{
-        width: 40;
+        width: 52;
     }}
     .row > Button {{
         margin-left: 2;
@@ -163,16 +173,19 @@ class SettingsScreen(Screen):
         padding-left: {LABEL_WIDTH};
         margin: -1 0 1 0;
     }}
-    #engine-progress {{
+    #engine-progress, .task-progress {{
         height: auto;
         padding-left: {LABEL_WIDTH};
         margin: -1 0 1 0;
     }}
-    #engine-progress ProgressBar {{
+    #engine-progress ProgressBar, .task-progress ProgressBar {{
         width: 1fr;
     }}
-    #engine-progress Bar {{
+    #engine-progress Bar, .task-progress Bar {{
         width: 1fr;
+    }}
+    #settings-buttons Button {{
+        min-width: 12;
     }}
     #settings-buttons {{
         height: auto;
@@ -203,7 +216,9 @@ class SettingsScreen(Screen):
 
     def compose(self) -> ComposeResult:
         s = self.draft
-        yield Header()
+        with Horizontal(id="settings-top"):
+            yield Static("[b]Settings[/b]", id="settings-title")
+            yield Static("[dim]ctrl+s save   esc cancel[/dim]", id="settings-keys")
         with VerticalScroll(id="settings-body"):
             if self.first_run:
                 yield Static(WELCOME, id="welcome")
@@ -239,6 +254,10 @@ class SettingsScreen(Screen):
                 with Horizontal(id="engine-progress"):
                     yield ProgressBar(total=None, show_eta=False)
                 yield hint(ENGINE_NOTE, id="engine-hint")
+                yield row("Models", Static(id="models-status", classes="status"),
+                          Button("Download all", compact=True, id="models-download"))
+                with Horizontal(id="models-progress", classes="task-progress"):
+                    yield ProgressBar(total=None, show_eta=False)
                 yield row("Separate", Toggle("Split every download into stems", s.separate, id="f-separate"))
                 yield row("Preset", self._select("separation_preset", {k: p.label for k, p in separation.PRESETS.items()}))
                 yield row("Quality", self._select("separation_quality", SEPARATION_QUALITIES))
@@ -263,9 +282,8 @@ class SettingsScreen(Screen):
                 yield hint(f"Settings are saved in {settings_path()}")
 
         with Horizontal(id="settings-buttons"):
-            yield Button("Cancel", id="cancel")
-            yield Button("Save", variant="primary", id="save")
-        yield Footer()
+            yield Button("Cancel", id="cancel", compact=True)
+            yield Button("Save", variant="primary", id="save", compact=True)
 
     def _select(self, name, choices):
         value = getattr(self.draft, name)
@@ -395,6 +413,39 @@ class SettingsScreen(Screen):
         install.disabled = self.uvr is None and not installing
         self.query_one("#engine-remove", Button).display = bool(info) and not installing
         self.query_one("#engine-hint").display = not info or installing
+        self.refresh_models(bool(info) and not installing)
+
+    def refresh_models(self, engine_ready):
+        """The "Download all" row: what is there, and any download running."""
+        downloader = getattr(self.app, "model_downloader", None)
+        busy = downloader is not None and downloader.state == "running"
+        status = self.query_one("#models-status", Static)
+        progress = self.query_one("#models-progress")
+        progress.display = busy
+        button = self.query_one("#models-download", Button)
+        button.label = "Cancel" if busy else "Download all"
+        if busy:
+            status.update(Text.from_markup(f"[yellow]↓ {downloader.stage}[/yellow]"))
+            bar = progress.query_one(ProgressBar)
+            if downloader.fraction is None:
+                bar.update(total=None)
+            else:
+                bar.update(total=100, progress=downloader.fraction * 100)
+            button.disabled = False
+            return
+
+        models = separation.all_models()
+        missing = separation.missing_models(self.uvr, models)
+        if not missing:
+            status.update(Text.from_markup(f"[green]✓[/green] All {len(models)} preset models are downloaded"))
+        else:
+            size = sum(separation.MODEL_SIZES_MB.get(model, 0) for model in missing)
+            text = f"{len(models) - len(missing)} of {len(models)} downloaded · about {size} MB to fetch"
+            if downloader is not None and downloader.state == "failed":
+                text = f"[red]Download failed:[/red] {downloader.error}"
+            status.update(Text.from_markup(text))
+        button.display = bool(missing)
+        button.disabled = not engine_ready
 
     # -- buttons --------------------------------------------------------------
 
@@ -449,6 +500,15 @@ class SettingsScreen(Screen):
             ),
             answered,
         )
+
+    @on(Button.Pressed, "#models-download")
+    def models_download(self):
+        downloader = getattr(self.app, "model_downloader", None)
+        if downloader is not None and downloader.state == "running":
+            downloader.cancel()
+        else:
+            self.app.start_model_download()
+        self.refresh_engine()
 
     @on(Button.Pressed, "#engine-remove")
     def engine_remove(self):

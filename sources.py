@@ -8,6 +8,7 @@ understands well over a thousand sites.
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 APPLE_HOSTS = {
@@ -62,6 +63,13 @@ DRM_SERVICES = {
     "music.amazon.co.uk": "Amazon Music",
     "music.amazon.de": "Amazon Music",
     "pandora.com": "Pandora",
+}
+
+# What counts as audio when a local file or folder is given. Video files are
+# included: Audacity imports their soundtrack.
+LOCAL_EXTENSIONS = {
+    ".mp3", ".m4a", ".aac", ".flac", ".wav", ".ogg", ".opus", ".alac", ".aif",
+    ".aiff", ".wma", ".mp4", ".m4v", ".mkv", ".webm", ".mov",
 }
 
 # Brand colours for the badges in the interface.
@@ -132,9 +140,36 @@ def _is_ambiguous_playlist(url, host):
     return "v" in query or host.endswith("youtu.be") or "/shorts/" in parsed.path
 
 
+def local_path(text):
+    """The file or folder ``text`` names on this computer, or None."""
+    text = text.strip().strip('"').strip("'")
+    if not text or "://" in text:
+        return None
+    try:
+        path = Path(text).expanduser()
+        return path.resolve() if path.exists() else None
+    except (OSError, ValueError):
+        return None
+
+
+def local_audio(path):
+    """The audio files a local file or folder holds, in name order."""
+    path = Path(path)
+    if path.is_file():
+        return [path] if path.suffix.lower() in LOCAL_EXTENSIONS else []
+    files = [p for p in path.rglob("*") if p.is_file() and p.suffix.lower() in LOCAL_EXTENSIONS]
+    return sorted(files, key=lambda p: [part.lower() for part in p.relative_to(path).parts])
+
+
 def identify(text):
     """Return a :class:`Source` describing how to download ``text``."""
     text = text.strip()
+
+    path = local_path(text)
+    if path is not None:
+        if not local_audio(path):
+            return Source("unsupported", "Local", str(path), problem="No audio files there.")
+        return Source("local", "Folder" if path.is_dir() else "File", str(path))
 
     if not looks_like_url(text):
         return Source("search", "Search", f"ytsearch1:{text}")
@@ -175,7 +210,16 @@ def split_input(text):
     ended up glued together without a space ("https://a...https://b...").
     Anything that is not purely links is kept whole, since it is probably a
     search.
+
+    Files dragged into the terminal arrive as paths, quoted when they contain
+    spaces; each file or folder becomes its own entry too.
     """
+    if local_path(text):
+        return [text.strip().strip('"').strip("'")]
+    tokens = [quoted or bare for quoted, bare in re.findall(r'"([^"]+)"|(\S+)', text)]
+    if len(tokens) > 1 and all(local_path(token) or looks_like_url(token) for token in tokens):
+        return tokens
+
     parts = [part for chunk in text.split() for part in GLUED_URLS.split(chunk) if part]
     if len(parts) > 1 and all(looks_like_url(part) for part in parts):
         return parts

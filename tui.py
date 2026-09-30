@@ -1,4 +1,9 @@
-"""The full screen terminal interface, built with Textual."""
+"""The full screen terminal interface, built with Textual.
+
+The screen is kept deliberately quiet: a box to paste into, three chips for
+the choices people change often, the list of downloads, and one line of key
+hints. Everything else lives in Settings (Ctrl+S).
+"""
 
 import threading
 import time
@@ -9,46 +14,31 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import (
-    Button,
-    Footer,
-    Header,
-    Input,
-    ProgressBar,
-    RichLog,
-    Select,
-    Static,
-)
+from textual.widgets import Button, Input, ProgressBar, RichLog, Static
 
 import audacity
 import separation
 from jobs import CANCELLED, DONE, FAILED, QUEUED, RUNNING, Runner
-from settings_screen import SettingsScreen, Toggle
+from settings_screen import SettingsScreen
 from sources import SITE_COLORS, identify, split_input
 from utils import describe_path, reveal
 
 REFRESH_INTERVAL = 1 / 8
 AUDACITY_POLL_INTERVAL = 4
 
-PLAYLIST_CHOICES = [("Ask", "ask"), ("Whole playlist", "all"), ("Just the track", "one")]
-PRESET_CHOICES = [(preset.short, key) for key, preset in separation.PRESETS.items()]
+PLAYLIST_LABELS = {"ask": "Ask", "all": "Whole playlist", "one": "Just the track"}
+STEM_CHOICES = [None] + list(separation.PRESETS)  # None means off
 
-LOG_STYLES = {
-    "info": "",
-    "success": "green",
-    "warning": "yellow",
-    "error": "bold red",
-}
+LOG_STYLES = {"info": "", "success": "green", "warning": "yellow", "error": "bold red"}
+
+HINTS = "enter add   ctrl+s settings   ctrl+o folder   ctrl+l log   ctrl+q quit"
+JOB_HINTS = "c cancel   r retry   o show   del remove   esc back"
 
 WELCOME = """\
-[b]Paste a link above and press Enter.[/b]
+[b]Drop in a link to get started[/b]
 
-[dim]Works with[/dim] YouTube · YouTube Music · SoundCloud · Bandcamp · Apple Music
-Mixcloud · Audiomack · Vimeo · TikTok · X · Twitch · Internet Archive
-[dim]and the 1,000+ other sites yt-dlp supports.[/dim]
-
-[dim]Not a link? Type a song name and the top YouTube result is downloaded.
-Paste several links at once to queue them all.[/dim]"""
+[dim]YouTube · SoundCloud · Bandcamp · Apple Music · and 1,000+ more
+Type a song name to search, or give a file or folder on this PC[/dim]"""
 
 
 def format_speed(speed):
@@ -71,11 +61,6 @@ def format_duration(seconds):
     return f"{minutes}:{seconds:02}"
 
 
-def badge(name):
-    color = SITE_COLORS.get(name, "#5a6374")
-    return Text(f" {name} ", style=f"bold #ffffff on {color}")
-
-
 class UrlInput(Input):
     """An Input that keeps every line of a multi-line paste, not just the first."""
 
@@ -88,6 +73,26 @@ class UrlInput(Input):
         # the text goes in twice.
         event.prevent_default()
         event.stop()
+
+
+class Chip(Static, can_focus=True):
+    """A small pill that changes a setting when clicked (or Enter/Space)."""
+
+    BINDINGS = [Binding("enter,space", "press", "Change", show=False)]
+
+    def __init__(self, action, **kwargs):
+        super().__init__(**kwargs)
+        self.chip_action = action
+
+    def on_click(self):
+        self.action_press()
+
+    def action_press(self):
+        getattr(self.app, f"action_{self.chip_action}")()
+
+    def show(self, label, value, on=True):
+        self.update(Text.assemble((f"{label} ", "dim"), (value, "bold" if on else "dim")))
+        self.set_class(on, "-on")
 
 
 class ConfirmScreen(ModalScreen):
@@ -108,8 +113,8 @@ class ConfirmScreen(ModalScreen):
         with Vertical(id="dialog"):
             yield Static(self.question, id="question")
             with Horizontal(id="buttons"):
-                yield Button(self.no, id="no")
-                yield Button(self.yes, variant="primary", id="yes")
+                yield Button(self.no, id="no", compact=True)
+                yield Button(self.yes, variant="primary", id="yes", compact=True)
 
     def on_mount(self):
         self.query_one("#yes" if self.default else "#no").focus()
@@ -123,13 +128,13 @@ class ConfirmScreen(ModalScreen):
 
 
 class JobCard(Vertical, can_focus=True):
-    """One download: what it is, how far along it is, and how it ended."""
+    """One download: a title, what is happening, and a thin progress line."""
 
     BINDINGS = [
-        Binding("c", "cancel", "Cancel"),
-        Binding("r", "retry", "Retry"),
-        Binding("o,enter", "reveal", "Show file"),
-        Binding("delete,backspace", "remove", "Remove"),
+        Binding("c", "cancel", "Cancel", show=False),
+        Binding("r", "retry", "Retry", show=False),
+        Binding("o,enter", "reveal", "Show file", show=False),
+        Binding("delete,backspace", "remove", "Remove", show=False),
         Binding("up,k", "app.focus_previous_card", "Previous", show=False),
         Binding("down,j", "app.focus_next_card", "Next", show=False),
     ]
@@ -142,19 +147,16 @@ class JobCard(Vertical, can_focus=True):
 
     def compose(self) -> ComposeResult:
         with Horizontal(classes="job-top"):
-            yield Static(badge(self.job.source.name), classes="badge")
             yield Static(classes="title")
             yield Static(classes="state")
-        with Horizontal(classes="progress"):
-            yield ProgressBar(total=None, show_eta=False, show_percentage=False)
-            yield Static(classes="percent")
         yield Static(classes="detail")
+        yield ProgressBar(total=None, show_eta=False, show_percentage=False)
 
     def on_mount(self):
         self.sync()
 
     def check_action(self, action, parameters):
-        """Only offer the actions that make sense for this job right now."""
+        """Only allow the actions that make sense for this job right now."""
         finished = self.job.finished_state
         if action == "cancel":
             return not finished
@@ -177,24 +179,19 @@ class JobCard(Vertical, can_focus=True):
             for state in (QUEUED, RUNNING, DONE, FAILED, CANCELLED):
                 self.set_class(job.state == state, f"-{state}")
             self.seen_state = job.state
-            self.refresh_bindings()
         self.set_class(bool(job.warning), "-warning")
 
         self.query_one(".title", Static).update(Text(job.label, style="bold"))
         self.query_one(".state", Static).update(self._state_text())
+        self.query_one(".detail", Static).update(self._detail_text())
 
-        self.query_one(".progress").display = job.state == RUNNING
+        bar = self.query_one(ProgressBar)
+        bar.display = job.state == RUNNING
         if job.state == RUNNING:
-            bar = self.query_one(ProgressBar)
-            percent = self.query_one(".percent", Static)
             if job.fraction is None:
                 bar.update(total=None)
-                percent.update("")
             else:
                 bar.update(total=100, progress=round(job.fraction * 100, 1))
-                percent.update(f"{job.fraction:.0%}")
-
-        self.query_one(".detail", Static).update(self._detail_text())
         return True
 
     def _state_text(self):
@@ -202,48 +199,52 @@ class JobCard(Vertical, can_focus=True):
         if job.state == QUEUED:
             return Text("Queued", style="dim")
         if job.state == RUNNING:
-            return Text(job.stage, style="bold")
+            text = Text(job.stage, style="bold")
+            if job.fraction is not None:
+                text.append(f"  {job.fraction:.0%}", style="dim")
+            return text
         if job.state == DONE:
             if job.warning:
-                return Text("⚠ Saved", style="bold yellow")
-            if job.import_into_audacity:
-                return Text("✓ In Audacity", style="bold green")
-            return Text("✓ Saved", style="bold green")
+                return Text("Done, with a note", style="yellow")
+            if job.imported:
+                return Text("✓ In Audacity", style="green")
+            return Text("✓ Done", style="green")
         if job.state == FAILED:
-            return Text("✗ Failed", style="bold red")
+            return Text("✗ Failed", style="red")
         return Text("Cancelled", style="dim")
 
     def _detail_text(self):
         job = self.job
+        color = SITE_COLORS.get(job.source.name)
+        text = Text(job.source.name, style=color or "dim")
+
+        def add(part, style="dim"):
+            if part:
+                text.append("  ·  ", style="dim")
+                text.append(part, style=style)
+
         if job.state == QUEUED:
-            return Text("Waiting for a free slot…", style="dim")
-
-        if job.state == RUNNING:
-            parts = []
+            add("waiting for a free slot")
+        elif job.state == RUNNING:
             if job.total and job.total > 1:
-                track = f"Track {job.index}/{job.total}"
+                track = f"{job.index}/{job.total}"
                 if job.title and job.title != job.label:
-                    track += f" · {job.title}"
-                parts.append(track)
+                    track += f" {job.title}"
+                add(track)
             elif job.source.kind == "search":
-                parts.append(f"Search: {job.text}")
-            if job.step:
-                parts.append(job.step)
-            speed = format_speed(job.speed)
-            if speed:
-                parts.append(speed)
-            eta = format_duration(job.eta)
-            if eta and job.stage == "Downloading":
-                parts.append(f"{eta} left")
-            return Text(" · ".join(parts) or job.source.url, style="dim")
-
-        text = Text()
-        style = {DONE: "", FAILED: "red", CANCELLED: "dim"}[job.state]
-        text.append(job.message or "", style=style)
-        if job.started and job.finished and job.state == DONE:
-            text.append(f"  ({format_duration(job.finished - job.started)})", style="dim")
-        if job.warning:
-            text.append(f"\n{job.warning}", style="yellow")
+                add(f"“{job.text}”")
+            add(job.step)
+            add(format_speed(job.speed))
+            if job.stage == "Downloading":
+                eta = format_duration(job.eta)
+                add(f"{eta} left" if eta else None)
+        else:
+            style = {DONE: "dim", FAILED: "red", CANCELLED: "dim"}[job.state]
+            add(job.message, style)
+            if job.started and job.finished and job.state == DONE:
+                add(format_duration(job.finished - job.started))
+            if job.warning:
+                text.append(f"\n{job.warning}", style="yellow")
         return text
 
     # -- actions --------------------------------------------------------------
@@ -271,52 +272,64 @@ class DownloaderApp(App):
     """Paste links, watch them download, find them in Audacity."""
 
     TITLE = "Audacity Quick Downloader"
+    ENABLE_COMMAND_PALETTE = False
 
     CSS = """
     Screen {
         layout: vertical;
+        background: $background;
     }
 
-    #top {
-        height: auto;
-        padding: 1 2 0 2;
+    #topbar {
+        height: 1;
+        margin: 1 3 0 3;
+    }
+    #brand {
+        width: 1fr;
+    }
+    #status {
+        width: auto;
     }
 
     #url {
-        border: round $primary;
-        border-title-color: $text-muted;
+        margin: 1 2 0 2;
         padding: 0 1;
+        border: round $panel-lighten-2;
+        background: $background;
     }
     #url:focus {
         border: round $accent;
-        border-title-color: $accent;
+        background-tint: $foreground 0%;
     }
 
-    #options {
+    #chips {
         height: 1;
-        margin: 0 1 1 1;
+        margin: 1 3;
     }
-    #options > * {
+    Chip {
         width: auto;
+        padding: 0 1;
         margin-right: 1;
-    }
-    #options .label {
+        background: $panel;
         color: $text-muted;
-        margin-right: 1;
     }
-    #options Select {
-        width: 18;
+    Chip.-on {
+        background: $primary 25%;
+        color: $text;
     }
-    #options #preset {
-        width: 26;
+    Chip:hover {
+        background: $primary 40%;
     }
-    #options #folder {
-        color: $text-muted;
+    Chip:focus {
+        background: $primary 55%;
+        color: $text;
+    }
+    #folder {
         width: 1fr;
         text-align: right;
-        margin-right: 0;
-        text-overflow: ellipsis;
+        color: $text-disabled;
         text-wrap: nowrap;
+        text-overflow: ellipsis;
     }
 
     #jobs {
@@ -324,52 +337,39 @@ class DownloaderApp(App):
         padding: 0 2;
         scrollbar-size-vertical: 1;
     }
-
     #empty {
         width: 100%;
         height: auto;
-        margin-top: 2;
-        padding: 1 2;
+        margin-top: 4;
         text-align: center;
-        border: round $panel-lighten-2;
-        color: $text;
     }
 
     JobCard {
         height: auto;
-        padding: 0 1;
-        border: round $panel-lighten-2;
-        background: $surface;
+        padding: 0 1 0 2;
+        margin-bottom: 1;
+        border-left: outer $panel-lighten-2;
     }
     JobCard:focus {
-        border: round $accent;
         background: $boost;
     }
     JobCard.-running {
-        border: round $primary;
+        border-left: outer $accent;
     }
     JobCard.-done {
-        border: round $success 70%;
+        border-left: outer $success;
     }
     JobCard.-done.-warning {
-        border: round $warning 70%;
+        border-left: outer $warning;
     }
     JobCard.-failed {
-        border: round $error 70%;
+        border-left: outer $error;
     }
-    JobCard.-cancelled, JobCard.-queued {
-        opacity: 80%;
+    JobCard.-queued, JobCard.-cancelled {
+        opacity: 70%;
     }
-    JobCard:focus.-done, JobCard:focus.-failed, JobCard:focus.-running {
-        border: round $accent;
-    }
-
     .job-top {
         height: 1;
-    }
-    .job-top .badge {
-        width: auto;
-        margin-right: 1;
     }
     .job-top .title {
         width: 1fr;
@@ -380,24 +380,24 @@ class DownloaderApp(App):
         width: auto;
         margin-left: 2;
     }
-    .progress {
-        height: 1;
-    }
-    .progress ProgressBar {
-        width: 1fr;
-    }
-    .progress ProgressBar > Bar {
-        width: 1fr;
-    }
-    .progress ProgressBar > Bar > .bar--indeterminate {
-        color: $accent;
-    }
-    .progress .percent {
-        width: 5;
-        text-align: right;
-    }
     .detail {
         height: auto;
+        color: $text-muted;
+    }
+    JobCard ProgressBar {
+        width: 100%;
+        height: 1;
+    }
+    JobCard ProgressBar > Bar {
+        width: 1fr;
+    }
+    JobCard ProgressBar > Bar > .bar--bar {
+        color: $accent;
+        background: $panel;
+    }
+    JobCard ProgressBar > Bar > .bar--indeterminate {
+        color: $accent;
+        background: $panel;
     }
 
     #log {
@@ -406,36 +406,35 @@ class DownloaderApp(App):
         margin: 0 2;
         border: round $panel-lighten-2;
         border-title-color: $text-muted;
-        background: $surface;
         scrollbar-size-vertical: 1;
     }
     #log.-visible {
         display: block;
     }
 
-    #status {
+    #bottombar {
         height: 1;
-        padding: 0 2;
-        background: $panel;
+        margin: 0 3 1 3;
     }
-    #status > Static {
-        width: auto;
-        margin-right: 3;
-    }
-    #status #counts {
+    #activity {
         width: 1fr;
-        text-align: right;
-        margin-right: 0;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
+    }
+    #hints {
+        width: auto;
+        color: $text-disabled;
     }
 
     ConfirmScreen {
         align: center middle;
+        background: $background 60%;
     }
     #dialog {
-        width: 64;
+        width: 60;
         max-width: 90%;
         height: auto;
-        padding: 1 2;
+        padding: 1 3;
         border: round $accent;
         background: $surface;
     }
@@ -448,16 +447,17 @@ class DownloaderApp(App):
     }
     #buttons Button {
         margin-left: 2;
+        min-width: 12;
     }
     """
 
     BINDINGS = [
         Binding("ctrl+q", "quit", "Quit", priority=True),
-        Binding("ctrl+l", "toggle_log", "Log"),
-        Binding("ctrl+o", "open_folder", "Open folder"),
-        Binding("ctrl+r", "clear_finished", "Clear finished"),
         Binding("ctrl+s", "settings", "Settings"),
-        Binding("escape", "focus_input", "Back to input", show=False),
+        Binding("ctrl+o", "open_folder", "Open folder"),
+        Binding("ctrl+l", "toggle_log", "Log"),
+        Binding("ctrl+r", "clear_finished", "Clear finished"),
+        Binding("escape", "focus_input", "Back", show=False),
     ]
 
     def __init__(self, settings, updater, initial_urls=(), first_run=False):
@@ -468,6 +468,8 @@ class DownloaderApp(App):
         self.first_run = first_run
         self.runner = Runner(settings, updater, ask=self.ask_from_thread)
         self.engine_installer = None
+        self.model_downloader = None
+        self.audacity_running = None
         self.cards = {}
         self.announced = set()
         self.update_announced = False
@@ -475,62 +477,38 @@ class DownloaderApp(App):
     # -- layout ---------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=True, icon="♫")
-        with Vertical(id="top"):
-            url = UrlInput(
-                placeholder="https://soundcloud.com/…  ·  https://youtu.be/…  ·  or a song name",
-                id="url",
-            )
-            url.border_title = "Paste a link or type a song name"
-            yield url
-            with Horizontal(id="options"):
-                yield Toggle("Import into Audacity", self.settings.import_to_audacity, id="import")
-                yield Toggle("Separate stems", self.settings.separate, id="separate")
-                yield Select(
-                    PRESET_CHOICES,
-                    value=self.settings.separation_preset,
-                    allow_blank=False,
-                    compact=True,
-                    id="preset",
-                )
-                yield Static("Playlists", classes="label")
-                yield Select(
-                    PLAYLIST_CHOICES,
-                    value=self.settings.playlist_mode,
-                    allow_blank=False,
-                    compact=True,
-                    id="playlist",
-                )
-                yield Static(id="folder")
+        with Horizontal(id="topbar"):
+            yield Static("[b]♫  Quick Downloader[/b]  [dim]for Audacity[/dim]", id="brand")
+            yield Static(id="status")
+        yield UrlInput(placeholder="Paste a link, search for a song, or drop in a file or folder", id="url")
+        with Horizontal(id="chips"):
+            yield Chip("toggle_import", id="chip-import")
+            yield Chip("cycle_stems", id="chip-stems")
+            yield Chip("cycle_playlists", id="chip-playlists")
+            yield Static(id="folder")
         with VerticalScroll(id="jobs"):
             yield Static(WELCOME, id="empty")
         log = RichLog(id="log", wrap=True, markup=False, max_lines=500)
         log.border_title = "Activity"
         yield log
-        with Horizontal(id="status"):
-            yield Static(id="audacity")
-            yield Static(id="uvr")
-            yield Static(id="updates")
-            yield Static(id="counts")
-        yield Footer()
+        with Horizontal(id="bottombar"):
+            yield Static(id="activity")
+            yield Static(HINTS, id="hints")
 
     def on_mount(self):
-        self.sub_title = "YouTube · SoundCloud · Bandcamp · Apple Music · and more"
         # Kept rather than looked up each tick: the timers can fire while the
         # app is closing, after the widgets have gone.
         self.jobs_view = self.query_one("#jobs")
         self.empty_view = self.query_one("#empty")
         self.log_view = self.query_one("#log", RichLog)
-        self.counts_view = self.query_one("#counts", Static)
-        self.updates_view = self.query_one("#updates", Static)
-        self.audacity_view = self.query_one("#audacity", Static)
-        self.uvr_view = self.query_one("#uvr", Static)
+        self.status_view = self.query_one("#status", Static)
+        self.activity_view = self.query_one("#activity", Static)
+        self.hints_view = self.query_one("#hints", Static)
         self.show_settings()
         self.query_one("#url").focus()
         self.set_interval(REFRESH_INTERVAL, self.refresh_jobs)
         self.set_interval(AUDACITY_POLL_INTERVAL, self.poll_audacity)
         self.poll_audacity()
-        self.show_audacity(None)
         for url in self.initial_urls:
             self.queue(url)
         if self.first_run:
@@ -567,51 +545,54 @@ class DownloaderApp(App):
         self.runner.add(text)
         self.refresh_jobs()
 
-    # -- options --------------------------------------------------------------
-
+    # -- the chips --------------------------------------------------------------
     # These change the current session; Settings (Ctrl+S) changes the defaults.
 
-    @on(Toggle.Changed, "#import")
-    def import_changed(self, event):
-        self.settings.import_to_audacity = event.value
+    def action_toggle_import(self):
+        self.settings.import_to_audacity = not self.settings.import_to_audacity
+        self.show_chips()
 
-    @on(Toggle.Changed, "#separate")
-    def separate_changed(self, event):
-        self.settings.separate = event.value
-        self.query_one("#preset").disabled = not event.value
-        if event.value and separation.engine_info() is None:
-            self.notify(
-                "Set up the separation engine in Settings (Ctrl+S) first, or downloads "
-                "will not be separated.",
-                title="Separation engine not installed",
-                severity="warning",
-            )
+    def action_cycle_stems(self):
+        current = self.settings.separation_preset if self.settings.separate else None
+        index = STEM_CHOICES.index(current) if current in STEM_CHOICES else 0
+        choice = STEM_CHOICES[(index + 1) % len(STEM_CHOICES)]
+        self.settings.separate = choice is not None
+        if choice:
+            self.settings.separation_preset = choice
+            if separation.engine_info() is None:
+                self.notify(
+                    "Set up the separation engine in Settings (Ctrl+S) first.",
+                    title="Stems are not set up yet",
+                    severity="warning",
+                )
+        self.show_chips()
 
-    @on(Select.Changed, "#preset")
-    def preset_changed(self, event):
-        self.settings.separation_preset = event.value
+    def action_cycle_playlists(self):
+        modes = list(PLAYLIST_LABELS)
+        index = modes.index(self.settings.playlist_mode) if self.settings.playlist_mode in modes else 0
+        self.settings.playlist_mode = modes[(index + 1) % len(modes)]
+        self.show_chips()
 
-    @on(Select.Changed, "#playlist")
-    def playlist_changed(self, event):
-        self.settings.playlist_mode = event.value
+    def show_chips(self):
+        settings = self.settings
+        self.query_one("#chip-import", Chip).show(
+            "Audacity", "On" if settings.import_to_audacity else "Off", settings.import_to_audacity
+        )
+        stems = self.query_one("#chip-stems", Chip)
+        stems.display = self.runner.uvr is not None
+        preset = separation.PRESETS.get(settings.separation_preset)
+        stems.show("Stems", preset.short if settings.separate and preset else "Off", settings.separate)
+        self.query_one("#chip-playlists", Chip).show(
+            "Playlists", PLAYLIST_LABELS.get(settings.playlist_mode, "Ask"), True
+        )
+        self.query_one("#folder", Static).update(f"→ {describe_path(settings.downloads)}")
 
     def show_settings(self):
-        """Make the options bar and theme match ``self.settings``."""
-        settings = self.settings
-        if settings.theme in self.available_themes:
-            self.theme = settings.theme
-        uvr = self.runner.uvr
-        separate = self.query_one("#separate", Toggle)
-        separate.display = uvr is not None
-        separate.value = settings.separate and uvr is not None
-        preset = self.query_one("#preset", Select)
-        preset.display = uvr is not None
-        preset.disabled = not separate.value
-        preset.value = settings.separation_preset
-        self.query_one("#import", Toggle).value = settings.import_to_audacity
-        self.query_one("#playlist", Select).value = settings.playlist_mode
-        self.query_one("#folder", Static).update(f"→ {describe_path(settings.downloads)}")
-        self.show_uvr()
+        """Make the chips and theme match ``self.settings``."""
+        if self.settings.theme in self.available_themes:
+            self.theme = self.settings.theme
+        self.show_chips()
+        self.show_status()
 
     def action_settings(self):
         if isinstance(self.screen, SettingsScreen):
@@ -634,19 +615,8 @@ class DownloaderApp(App):
     def start_engine_install(self, device):
         self.engine_installer = separation.EngineInstaller(device, log=self.runner.log).start()
 
-    def show_uvr(self):
-        if self.runner.uvr is None:
-            self.uvr_view.display = False
-            return
-        self.uvr_view.display = True
-        installer = self.engine_installer
-        if installer is not None and installer.state == "running":
-            percent = f" {installer.fraction:.0%}" if installer.fraction is not None else ""
-            self.uvr_view.update(f"[yellow]↻ UVR5 engine: {installer.stage}{percent}[/yellow]")
-        elif separation.engine_info():
-            self.uvr_view.update("[green]●[/green] UVR5 ready")
-        else:
-            self.uvr_view.update("[dim]◐ UVR5 found · engine not set up (Ctrl+S)[/dim]")
+    def start_model_download(self):
+        self.model_downloader = separation.ModelDownloader(self.runner.uvr, log=self.runner.log).start()
 
     # -- keeping the screen current -------------------------------------------
 
@@ -666,21 +636,14 @@ class DownloaderApp(App):
                 card.sync()
             if job.finished_state and job.id not in self.announced:
                 self.announced.add(job.id)
-                self.announce(job)
+                if job.state == FAILED:
+                    self.notify(job.message, title=job.label, severity="error", timeout=8, markup=False)
 
         self.empty_view.display = not jobs
         self.drain_log()
-        self.show_uvr()
-        self.show_updates()
-        self.show_counts()
-
-    def announce(self, job):
-        """Pop up a notification when a download finishes."""
-        if job.state == DONE:
-            severity = "warning" if job.warning else "information"
-            self.notify(job.message, title=job.label, severity=severity, markup=False)
-        elif job.state == FAILED:
-            self.notify(job.message, title="Download failed", severity="error", timeout=8, markup=False)
+        self.show_status()
+        self.show_activity()
+        self.hints_view.update(JOB_HINTS if isinstance(self.focused, JobCard) else HINTS)
 
     def drain_log(self):
         log = self.log_view
@@ -689,53 +652,52 @@ class DownloaderApp(App):
             stamp = time.strftime("%H:%M:%S", time.localtime(when))
             log.write(Text.assemble((f"{stamp} ", "dim"), (message, LOG_STYLES.get(level, ""))))
 
-    def show_counts(self):
+    def show_status(self):
+        """The dots in the top right: is Audacity up, is UVR5 ready."""
+        text = Text()
+        if audacity.find_audacity() is not None:
+            if self.audacity_running:
+                text.append("● ", style="green")
+                text.append("Audacity")
+            else:
+                text.append("○ Audacity", style="dim")
+        if self.runner.uvr is not None:
+            installer, downloader = self.engine_installer, self.model_downloader
+            if text:
+                text.append("    ")
+            if installer is not None and installer.state == "running":
+                percent = f" {installer.fraction:.0%}" if installer.fraction is not None else ""
+                text.append(f"↻ Installing UVR5 engine{percent}", style="yellow")
+            elif downloader is not None and downloader.state == "running":
+                percent = f" {downloader.fraction:.0%}" if downloader.fraction is not None else ""
+                text.append(f"↓ Downloading models{percent}", style="yellow")
+            elif separation.engine_info():
+                text.append("● ", style="green")
+                text.append("UVR5")
+            else:
+                text.append("◐ UVR5 not set up", style="yellow")
+        self.status_view.update(text)
+
+    def show_activity(self):
+        """The bottom left: what is going on, only when something is."""
         jobs = self.runner.jobs
         running = sum(job.state == RUNNING for job in jobs)
         queued = sum(job.state == QUEUED for job in jobs)
         done = sum(job.state == DONE for job in jobs)
         failed = sum(job.state == FAILED for job in jobs)
         parts = []
+        updating = [s.name for s in self.updater.packages.values() if s.state in ("checking", "updating")]
+        if any(s.state == "updating" for s in self.updater.packages.values()):
+            parts.append(f"[yellow]↻ updating {', '.join(updating)}[/yellow]")
         if running:
-            parts.append(f"[b]{running}[/b] downloading")
+            parts.append(f"{running} working")
         if queued:
             parts.append(f"{queued} queued")
         if done:
             parts.append(f"[green]{done} done[/green]")
         if failed:
             parts.append(f"[red]{failed} failed[/red]")
-        self.counts_view.update(" · ".join(parts))
-
-    def show_updates(self):
-        pieces = []
-        for status in self.updater.packages.values():
-            version = status.installed or "not installed"
-            if status.helper:
-                # Deno and friends are only worth a mention while they are
-                # being installed, or if they could not be.
-                helper = {
-                    "updating": f"[yellow]{status.name} ↻ installing[/yellow]",
-                    "updated": f"[green]{status.name} {version} ✓ installed[/green]",
-                    "outdated": f"[yellow]{status.name} missing[/yellow]",
-                    "failed": f"[red]{status.name} (install failed)[/red]",
-                }.get(status.state)
-                if helper:
-                    pieces.append(helper)
-            elif status.state == "checking":
-                pieces.append(f"[dim]{status.name} {version} …[/dim]")
-            elif status.state == "updating":
-                pieces.append(f"[yellow]{status.name} ↻ {status.latest}[/yellow]")
-            elif status.state == "updated":
-                pieces.append(f"[green]{status.name} {version} ↑[/green]")
-            elif status.state == "outdated":
-                pieces.append(f"[yellow]{status.name} {version} → {status.latest}[/yellow]")
-            elif status.state == "failed":
-                pieces.append(f"[red]{status.name} {version} (update failed)[/red]")
-            elif status.state == "current":
-                pieces.append(f"{status.name} {version} [green]✓[/green]")
-            else:
-                pieces.append(f"[dim]{status.name} {version}[/dim]")
-        self.updates_view.update("   ".join(pieces))
+        self.activity_view.update("   ".join(parts))
 
         if not self.updater.busy and not self.update_announced:
             self.update_announced = True
@@ -750,9 +712,11 @@ class DownloaderApp(App):
             self.notify(message, title="Updates installed")
             self.runner.log(message, "success")
         if outdated:
-            hint = "pip install --upgrade -r requirements.txt"
             names = ", ".join(s.name for s in outdated)
-            self.runner.log(f"{names} could be updated or installed. Run: {hint}", "warning")
+            self.runner.log(
+                f"{names} could be updated or installed. Run: pip install --upgrade -r requirements.txt",
+                "warning",
+            )
         if self.updater.error:
             self.notify(self.updater.error, title="Update failed", severity="warning", markup=False)
             self.runner.log(f"Update failed: {self.updater.error}", "warning")
@@ -762,18 +726,7 @@ class DownloaderApp(App):
 
     def _check_audacity(self):
         running = audacity.is_running()
-        self.call_from_thread(self.show_audacity, running)
-
-    def show_audacity(self, running):
-        widget = self.audacity_view
-        if running is False and audacity.find_audacity() is None:
-            widget.update("[dim]○ Audacity not installed[/dim]")
-        elif running is None:
-            widget.update("[dim]○ Audacity …[/dim]")
-        elif running:
-            widget.update("[green]●[/green] Audacity running")
-        else:
-            widget.update("[dim]○ Audacity not running[/dim]")
+        self.call_from_thread(setattr, self, "audacity_running", running)
 
     # -- questions from worker threads ----------------------------------------
 
@@ -819,9 +772,6 @@ class DownloaderApp(App):
     def action_focus_input(self):
         self.query_one("#url").focus()
 
-    def _cards_in_order(self):
-        return list(self.query(JobCard))
-
     def action_focus_next_card(self):
         self._move_card_focus(1)
 
@@ -829,7 +779,7 @@ class DownloaderApp(App):
         self._move_card_focus(-1)
 
     def _move_card_focus(self, step):
-        cards = self._cards_in_order()
+        cards = list(self.query(JobCard))
         if not cards:
             return
         focused = self.focused

@@ -10,7 +10,8 @@ line on stdout:
     {"event": "done", "stems": {"Vocals": "C:/.../Song (Vocals).wav", ...}}
     {"event": "error", "message": "..."}
 
-Run with --check to confirm the engine loads, and see whether a GPU is used.
+Run with --check to confirm the engine loads, and see whether a GPU is used,
+or with --download <model folder> <model>... to fetch models ahead of time.
 """
 
 import json
@@ -193,12 +194,27 @@ def merge(paths, destination):
     return destination
 
 
+def download(model_dir, models):
+    """Fetch models ahead of time, without loading them."""
+    patch_progress_bars()
+    from audio_separator.separator import Separator
+
+    separator = Separator(log_level=logging.WARNING, model_file_dir=model_dir)
+    for index, model in enumerate(models, 1):
+        emit("step", index=index, label=Path(model).stem)
+        separator.download_model_and_data(model)
+    emit("done", stems={})
+
+
 def main():
     if sys.argv[1:] == ["--check"]:
         check()
         return 0
     try:
-        run(json.loads(sys.argv[1]))
+        if sys.argv[1] == "--download":
+            download(sys.argv[2], sys.argv[3:])
+        else:
+            run(json.loads(sys.argv[1]))
     except Exception as error:
         emit("error", message=f"{type(error).__name__}: {error}")
         return 1

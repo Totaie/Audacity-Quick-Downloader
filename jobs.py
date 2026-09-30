@@ -19,7 +19,7 @@ from pathlib import Path
 import audacity
 import separation
 from applemusicdownloader import DEFAULT_COOKIES, download_apple_music
-from sources import identify
+from sources import identify, local_audio
 from utils import Cancelled, DownloadError, Reporter, describe_path
 from ytdlpdownloader import download_audio
 
@@ -270,40 +270,68 @@ class Runner:
             return self._finish(job, FAILED, str(error))
 
         job.files = files
-        summary = [f"Saved {plural(len(files), 'file')} to {describe_path(settings.downloads)}"]
+        if job.source.kind == "local":
+            summary = [f"Found {plural(len(files), 'audio file')}"]
+        else:
+            summary = [f"Saved {plural(len(files), 'file')} to {describe_path(settings.downloads)}"]
+        importing = settings.import_to_audacity
+        timeout = audacity.STARTUP_TIMEOUT if audacity_expected else 10
+        imported = 0
+        import_failed = False
 
-        stems_by_song = {}
-        if settings.separate:
+        # The song goes into Audacity straight away, so it can be worked on
+        # while the (slower) separation runs; the stems follow when ready.
+        if importing and settings.import_original and not job.cancel_event.is_set():
             try:
-                stems_by_song = self._separate(job, files)
+                self._import(job, files, timeout)
+                imported += len(files)
+            except audacity.AudacityError as error:
+                self._warn(job, f"Not imported: {error}")
+                import_failed = True
+
+        if settings.separate:
+            def import_stems(song, stems):
+                # Each song's stems go in as soon as they are ready, rather
+                # than after a whole album has been separated.
+                nonlocal imported, import_failed
+                if not (importing and settings.import_stems and stems) or import_failed:
+                    return
+                try:
+                    self._import(job, stems, timeout)
+                    imported += len(stems)
+                except audacity.AudacityError as error:
+                    self._warn(job, f"Stems not imported: {error}")
+                    import_failed = True
+
+            try:
+                self._separate(job, files, on_song=import_stems)
             except Cancelled:
-                return self._finish(job, CANCELLED, "Cancelled while separating; the downloads were kept.")
+                return self._finish(job, CANCELLED, "Cancelled while separating; the songs were kept.")
             if job.stems:
                 summary.append(
                     f"split into {plural(len(job.stems), 'stem')} in {describe_path(settings.separated)}"
                 )
 
-        to_import = []
-        for song in files:
-            if settings.import_original:
-                to_import.append(song)
-            if settings.import_stems:
-                to_import += stems_by_song.get(song, [])
-
-        if not settings.import_to_audacity or not to_import or job.cancel_event.is_set():
-            return self._finish(job, DONE, ", ".join(summary) + ".")
-
-        try:
-            self._import(job, to_import, audacity.STARTUP_TIMEOUT if audacity_expected else 10)
-        except audacity.AudacityError as error:
-            self._warn(job, f"Not imported: {error}")
-            return self._finish(job, DONE, ", ".join(summary) + ", but not imported into Audacity.")
-        summary.append(f"imported {plural(len(to_import), 'track')} into Audacity")
-        self._finish(job, DONE, ", ".join(summary[:-1]) + " and " + summary[-1] + ".")
+        if imported:
+            summary.append(f"imported {plural(imported, 'track')} into Audacity")
+        text = ", ".join(summary[:-1]) + " and " + summary[-1] if len(summary) > 1 else summary[0]
+        if import_failed:
+            text += ", but not everything was imported into Audacity"
+        self._finish(job, DONE, text + ".")
 
     def _download(self, job):
         settings = job.settings
         source = job.source
+        if source.kind == "local":
+            # Nothing to download: use the files where they are.
+            files = local_audio(source.url)
+            if not files:
+                raise DownloadError("There are no audio files there.")
+            if len(files) > 1:
+                job.collection, job.total = Path(source.url).name, len(files)
+            else:
+                job.title = files[0].stem
+            return files
         reporter = JobReporter(job, self.log)
         if source.kind == "apple":
             return download_apple_music(
@@ -326,7 +354,7 @@ class Runner:
             audio_format=settings.audio_format,
         )
 
-    def _separate(self, job, files):
+    def _separate(self, job, files, on_song=None):
         """Split each downloaded file into stems. Returns {song: [stem paths]}.
 
         Problems here are warnings rather than failures: the download itself
@@ -380,6 +408,8 @@ class Runner:
             ordered += [path for name, path in stems.items() if name not in order]
             results[song] = ordered
             job.stems += ordered
+            if on_song and not job.cancel_event.is_set():
+                on_song(song, ordered)
         return results
 
     def _prepare_audacity(self, settings):

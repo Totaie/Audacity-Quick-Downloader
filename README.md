@@ -31,6 +31,8 @@ and imported for you.
   else [yt-dlp] supports, plus Apple Music via [gamdl].
 - **Or just type a song name.** Anything that is not a link is searched for on
   YouTube and the top result is downloaded.
+- **Or use files you already have.** Give it a file or a whole folder and it
+  imports and/or separates them, no download needed.
 - **A proper terminal interface.** Every download gets a card with a live
   progress bar, speed and time left. Queue as many as you like; three run at
   once.
@@ -145,13 +147,14 @@ UVR5, linking them rather than copying so they take no extra space.
 - **Linux:** follow the install steps in the UVR5 README, then set the
   **UVR5 folder** in Settings to where you cloned it.
 
-### 2. Models (nothing to do)
+### 2. Models
 
 The presets use the best models audio-separator can run, chosen from the
 public benchmarks on [MVSEP](https://mvsep.com/quality_checker/multisong_leaderboard).
-Any a preset needs that you do not have are downloaded the first time it is
-used (Settings tells you which, and how big). If UVR5 already has a model, its
-copy is used instead.
+To get them all in one go (about 1.2 GB), click **Download all** next to
+**Models** in Settings once the engine is set up. Otherwise each is downloaded
+the first time a preset needs it. If UVR5 already has a model, its copy is used
+instead.
 
 | Preset | Stems | Best / Balanced | Fast |
 | --- | --- | --- | --- |
@@ -228,10 +231,29 @@ when `requirements.txt` changes, so it opens straight away.
 
 ### In the app
 
-Type or paste into the box at the top and press `Enter`. Pasting several links
-at once queues them all. A link that points at a video *and* a playlist asks
-which you want, unless **Playlists** is set to always or never take the whole
-thing.
+Type or paste into the box at the top and press `Enter`. It takes:
+
+- **A link**, or several pasted at once.
+- **A song name**, to download the top YouTube result.
+- **A file or folder on this PC.** Paste its path, or drag it from Explorer
+  into the window. Nothing is downloaded: the songs are imported and/or
+  separated where they are, following your settings (a folder includes its
+  sub-folders). Dropping a file or folder onto `main-runner.bat` works too.
+
+A link that points at a video *and* a playlist asks which you want, unless
+**Playlists** is set to always or never take the whole thing.
+
+Under the box are three chips. Click one (or `Tab` to it and press `Enter`)
+to change it for this session; your saved defaults live in Settings:
+
+- **Audacity**: import into Audacity, on or off.
+- **Stems**: off, or which preset to separate with. Only shown when UVR5 is
+  installed.
+- **Playlists**: ask, whole playlist, or just the track.
+
+When a song is both imported and separated, the song goes into Audacity as
+soon as it is downloaded so you can start working on it, and its stems follow
+as soon as they are ready.
 
 | Key | What it does |
 | --- | --- |
@@ -245,12 +267,9 @@ thing.
 | `Ctrl+L` | Show or hide the activity log. |
 | `Ctrl+O` | Open the downloads folder. |
 | `Ctrl+R` | Clear finished downloads from the list. |
-| `Ctrl+P` | Command palette. |
 | `Ctrl+Q` | Quit. |
 
-The **Import into Audacity**, **Separate stems** and **Playlists** controls
-above the list change things for this session only, and apply to downloads
-added after you change them. Your saved defaults live in Settings.
+The line at the bottom always shows the keys that apply right now.
 
 ### Settings
 
@@ -263,7 +282,7 @@ own, and updating the app never resets them.
 | --- | --- |
 | Downloads | Download folder, audio format (MP3, M4A, Opus, Ogg, FLAC, WAV), bitrate, playlist behaviour, cover art. |
 | Audacity | Import automatically, start Audacity automatically, turn on its scripting module. |
-| Stem separation | Set up or remove the engine, separate automatically, preset, quality, stems folder, import the original and/or the stems, GPU or CPU, UVR5's folder. Stems use the Downloads format and bitrate. |
+| Stem separation | Set up or remove the engine, download every model in one go, separate automatically, preset, quality, stems folder, import the original and/or the stems, GPU or CPU, UVR5's folder. Stems use the Downloads format and bitrate. |
 | Cookies | Apple Music cookies file, cookies for other sites. |
 | Appearance | Colour theme. |
 
