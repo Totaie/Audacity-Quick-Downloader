@@ -11,6 +11,7 @@ created when the user asks for it from the Settings screen. Separations run
 in a separate process using that environment: separator_worker.py.
 """
 
+import functools
 import json
 import os
 import queue
@@ -81,7 +82,7 @@ class SeparationError(DownloadError):
 # Model choices come from MVSEP's public benchmarks (mvsep.com/quality_checker),
 # picking the best single models audio-separator can run:
 #
-#   Vocals / instrumental  BS-Roformer "Resurrection" by unwa   vocals SDR 11.36
+#   Vocals / instrumental  BS-Roformer "Leap" by unwa           vocals SDR 11.72
 #   Six stems              BS-Roformer SW (ships with UVR 5.6)  drums 14.11, bass 14.62,
 #                                                               #1 on the guitar board
 #   Lead / backing vocals  BS-Roformer Karaoke by anvuew        lead SDR 10.23
@@ -134,7 +135,9 @@ STEM_ORDER = ["Vocals", "Lead Vocals", "Backing Vocals", "Instrumental", "Drums"
 
 
 # Best models (downloaded on first use if UVR5 does not have them).
-RESURRECTION = "bs_roformer_vocals_resurrection_unwa.ckpt"
+# Leap replaced Resurrection: on 20 MUSDB18-HQ test songs it scored 12.1 dB
+# vocals SDR against 6.6 for Resurrection as audio-separator configures it.
+LEAP = "bs_roformer_leap_voc.ckpt"
 SW = "BS-Roformer-SW.ckpt"
 KARAOKE = "bs_roformer_karaoke_anvuew.ckpt"
 # The classic UVR5 models, for Fast.
@@ -143,7 +146,17 @@ KARA_2 = "UVR_MDXNET_KARA_2.onnx"
 DEMUCS_4 = "htdemucs.yaml"
 DEMUCS_6 = "htdemucs_6s.yaml"
 
-MODEL_SIZES_MB = {RESURRECTION: 195, SW: 667, KARAOKE: 195, INST_HQ_3: 64, KARA_2: 50, DEMUCS_4: 80, DEMUCS_6: 53}
+MODEL_SIZES_MB = {LEAP: 228, SW: 667, KARAOKE: 195, INST_HQ_3: 64, KARA_2: 50, DEMUCS_4: 80, DEMUCS_6: 53}
+
+# Models audio-separator does not list itself, fetched from Hugging Face on
+# first use with their authors' own configs (see separator_worker.py).
+HF = "https://huggingface.co"
+EXTRA_MODELS = {
+    LEAP: {
+        "model": f"{HF}/pcunwa/BS-Roformer-Leap/resolve/main/bs_roformer_leap_voc.ckpt",
+        "config": f"{HF}/pcunwa/BS-Roformer-Leap/resolve/main/bs_leap_voc_conf.yaml",
+    },
+}
 
 # A karaoke model splits a vocal track into the lead (its "Vocals") and
 # everything else, which on a vocals-only input is the backing vocals.
@@ -156,14 +169,14 @@ PRESETS = {
         "Vocals + Instrumental",
         "Vocals + Instrumental",
         "Two stems: the vocals and everything else.",
-        (Step(RESURRECTION, "song", {"Vocals": "Vocals", "Other": "Instrumental"}),),
+        (Step(LEAP, "song", {"Vocals": "Vocals", "Other": "Instrumental"}),),
         (Step(INST_HQ_3, "song", {"Vocals": "Vocals", "Instrumental": "Instrumental"}),),
     ),
     "lead_backing": Preset(
         "Instrumental + Lead + Backing vocals",
         "Inst + Lead + Backing",
         "Three stems: the vocals are split again into the lead and the backing vocals.",
-        (Step(RESURRECTION, "song", {"Vocals": "_vocals", "Other": "Instrumental"}), SPLIT_VOCALS),
+        (Step(LEAP, "song", {"Vocals": "_vocals", "Other": "Instrumental"}), SPLIT_VOCALS),
         (Step(INST_HQ_3, "song", {"Vocals": "_vocals", "Instrumental": "Instrumental"}), SPLIT_VOCALS_FAST),
     ),
     "four_stems": Preset(
@@ -214,10 +227,100 @@ QUALITY_LEVELS = {
 
 
 def resolve_quality(quality, device):
-    """Turn "auto" into a real level: Best on a GPU, Fast on the CPU."""
+    """Turn "auto" into a real level, the one recommended for this PC."""
     if quality in QUALITY_LEVELS:
         return quality
-    return "best" if device == "gpu" else "fast"
+    return recommended_quality(device)[0]
+
+
+# --------------------------------------------------------------------------
+# What this PC can run
+# --------------------------------------------------------------------------
+#
+# Measured on 20 one-minute songs on an RTX 5070 Ti with fp16: the Roformer
+# models peak at 1.5-2.3 GB of GPU memory (plus a few hundred MB for CUDA
+# itself) and take 13-24 s per minute of song at overlap 8. The classic Fast
+# models are small ONNX/VR networks that run well on a CPU or a small GPU.
+
+BEST_MIN_VRAM_GB = 5.5  # a 6 GB card: room for the largest model plus the desktop (cards report a little under their label)
+ROFORMER_MIN_VRAM_GB = 3.5  # a 4 GB card; below this, even Balanced runs out of memory
+LOW_FREE_VRAM_GB = 3  # warn when less than this is free as a separation starts
+TENSOR_CORES = 7.0  # compute capability from which fp16 is fast (RTX 20 series on)
+
+
+@dataclass(frozen=True)
+class Hardware:
+    gpu: str = None  # the NVIDIA GPU's name, if there is one
+    vram_gb: float = 0.0
+    compute: float = 0.0  # CUDA compute capability, e.g. 12.0 for an RTX 50 card
+    cpu_threads: int = 1
+
+
+def _nvidia_smi(fields):
+    """Rows of nvidia-smi's answer for ``fields`` (first GPU first), or []."""
+    smi = shutil.which("nvidia-smi")
+    if not smi:
+        return []
+    try:
+        result = subprocess.run(
+            [smi, f"--query-gpu={fields}", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            **_no_window(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode != 0:
+        return []
+    return [[cell.strip() for cell in line.split(",")] for line in result.stdout.splitlines() if line.strip()]
+
+
+def _number(text):
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+@functools.lru_cache(maxsize=1)
+def hardware():
+    """This PC's NVIDIA GPU (the one CUDA uses first) and CPU, looked up once."""
+    threads = os.cpu_count() or 1
+    rows = _nvidia_smi("name,memory.total,compute_cap")
+    if not rows:
+        return Hardware(cpu_threads=threads)
+    name, total, compute = (rows[0] + ["", "", ""])[:3]
+    return Hardware(name, _number(total) / 1024, _number(compute), threads)
+
+
+def free_vram_gb():
+    """GPU memory free right now, or None without an NVIDIA GPU.
+
+    It changes all the time (games, browsers and local AI models all hold on
+    to some), so it is measured when a separation starts, not cached.
+    """
+    rows = _nvidia_smi("memory.free")
+    return _number(rows[0][0]) / 1024 if rows else None
+
+
+def has_nvidia_gpu():
+    return hardware().gpu is not None
+
+
+def recommended_quality(device):
+    """(quality level, reason) that "Automatic" picks on this PC."""
+    found = hardware()
+    if device != "gpu" or found.gpu is None:
+        return "fast", f"no NVIDIA GPU in use, so the classic models on {found.cpu_threads} CPU threads"
+    gpu = f"{found.gpu} ({found.vram_gb:.0f} GB)" if found.vram_gb else found.gpu
+    if found.vram_gb and found.vram_gb < ROFORMER_MIN_VRAM_GB:
+        return "fast", f"{gpu} has too little memory for the newest models"
+    if found.vram_gb and found.vram_gb < BEST_MIN_VRAM_GB:
+        return "balanced", f"{gpu} fits the newest models, at half the overlap"
+    if found.compute and found.compute < TENSOR_CORES:
+        return "balanced", f"{gpu} predates the RTX tensor cores, so half the overlap keeps it quick"
+    return "best", f"{gpu} runs the newest models at full overlap"
 
 
 def tuning(quality, device):
@@ -347,23 +450,6 @@ def engine_info():
         return json.loads(ENGINE_MARKER.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-
-
-def has_nvidia_gpu():
-    smi = shutil.which("nvidia-smi")
-    if not smi:
-        return False
-    try:
-        result = subprocess.run(
-            [smi, "--query-gpu=name", "--format=csv,noheader"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            **_no_window(),
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return result.returncode == 0 and bool(result.stdout.strip())
 
 
 def _no_window():
@@ -699,6 +785,14 @@ def separate(
         device = engine_info().get("device", "cpu")
     quality = resolve_quality(quality, device)
     steps = PRESETS[preset].steps_for(quality)
+    if device == "gpu" and quality != "fast":
+        free = free_vram_gb()
+        if free is not None and free < LOW_FREE_VRAM_GB:
+            reporter.log(
+                f"Only {free:.1f} GB of GPU memory is free; another program is using the rest. "
+                "Separating may be slow or fail; closing it (a game, or a local AI model) helps.",
+                "warning",
+            )
 
     song = Path(song)
     output = unique_folder(output_root, song.stem)
@@ -848,6 +942,11 @@ def separate(
         if not stems:
             shutil.rmtree(output, ignore_errors=True)
         message = problem[-1] if problem else (tail[-1] if tail else f"exit code {process.returncode}")
+        if "out of memory" in message.lower():
+            message = (
+                "the GPU ran out of memory. Close other programs using it (games, local AI models), "
+                "or set Quality to Fast in Settings"
+            )
         raise SeparationError(f"Separation failed: {message}")
     if failures:
         raise SeparationError(failures[0])

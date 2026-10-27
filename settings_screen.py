@@ -382,7 +382,8 @@ class SettingsScreen(Screen):
         else:
             text += ", already downloaded."
         if self.value("separation_quality") == "auto":
-            text += f" Automatic means {separation.QUALITY_LEVELS[quality]['label']} here."
+            _, reason = separation.recommended_quality(device)
+            text += f" Automatic picks {separation.QUALITY_LEVELS[quality]['label']} on this PC: {reason}."
         self.set_hint("#preset-hint", text)
 
         downloads = Path(self.value("download_dir") or default_downloads_dir())

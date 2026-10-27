@@ -189,15 +189,15 @@ UVR5, linking them rather than copying so they take no extra space.
 
 The presets use the best models audio-separator can run, chosen from the
 public benchmarks on [MVSEP](https://mvsep.com/quality_checker/multisong_leaderboard).
-To get them all in one go (about 1.2 GB), click **Download all** next to
+To get them all in one go (about 1.3 GB), click **Download all** next to
 **Models** in Settings once the engine is set up. Otherwise each is downloaded
 the first time a preset needs it. If UVR5 already has a model, its copy is used
 instead.
 
 | Preset | Stems | Best / Balanced | Fast |
 | --- | --- | --- | --- |
-| Vocals + Instrumental | Vocals, Instrumental | BS-Roformer Resurrection | MDX-Net Inst HQ 3 |
-| Instrumental + Lead + Backing vocals | Instrumental, Lead Vocals, Backing Vocals | BS-Roformer Resurrection, then BS-Roformer Karaoke | Inst HQ 3, then KARA 2 |
+| Vocals + Instrumental | Vocals, Instrumental | BS-Roformer Leap | MDX-Net Inst HQ 3 |
+| Instrumental + Lead + Backing vocals | Instrumental, Lead Vocals, Backing Vocals | BS-Roformer Leap, then BS-Roformer Karaoke | Inst HQ 3, then KARA 2 |
 | Vocals, Drums, Bass, Other | 4 stems | BS-Roformer SW (guitar and piano folded into Other) | Demucs v4 htdemucs |
 | Six stems | Vocals, Drums, Bass, Guitar, Piano, Other | BS-Roformer SW | Demucs v4 htdemucs_6s |
 | All stems | Lead and Backing Vocals, Drums, Bass, Guitar, Piano, Other | BS-Roformer SW, then BS-Roformer Karaoke | htdemucs, then KARA 2 (no guitar/piano) |
@@ -206,9 +206,17 @@ Why these models (MVSEP scores, SDR in dB, higher is better):
 
 | Model | Scores | Replaces |
 | --- | --- | --- |
-| BS-Roformer "Resurrection" by unwa | vocals 11.36 | MDX-Net Inst HQ 3, htdemucs vocals (about 9–10) |
+| BS-Roformer "Leap" by unwa | vocals 11.72, with the least instrument bleed of the top public models | MDX-Net Inst HQ 3, htdemucs vocals (about 9–10) |
 | BS-Roformer SW (ships with UVR 5.6) | drums 14.11, bass 14.62, vocals 11.30; #1 for guitar, ahead of Logic Pro's stem splitter | Demucs v4 (drums and bass 2–3 dB lower) |
 | BS-Roformer Karaoke by anvuew | lead vocals 10.23, the best public single model | UVR_MDXNET_KARA_2 (about 5.4) |
+
+Leap is not on audio-separator's own model list, so the app fetches it from
+its author's Hugging Face page, with its own config.
+
+The vocal models were also checked locally, on 20 one-minute excerpts from the
+MUSDB18-HQ test set. Leap scored 12.1 dB vocals SDR. Leap Xe and anvuew's ft1
+were 0.1 dB higher, but with more instrument bleed. BS-Roformer Resurrection,
+the previous choice, managed only 6.6 dB as audio-separator configures it.
 
 ### Quality
 
@@ -221,8 +229,17 @@ Why these models (MVSEP scores, SDR in dB, higher is better):
   close in quality.
 - **Fast**: the classic UVR5 models. Several times quicker than the Roformer
   models, which is what makes separation practical without an NVIDIA GPU.
-- **Automatic** (the default) picks Best when the engine has a GPU and Fast when
-  it does not.
+- **Automatic** (the default) looks at your PC and picks:
+  - **Best** on an NVIDIA GPU with 6 GB or more, RTX 20 series or newer;
+  - **Balanced** on a 4 to 6 GB GPU, or an older GTX card, where half the
+    overlap keeps it quick;
+  - **Fast** with less than 4 GB, or with no NVIDIA GPU at all.
+
+  Settings shows what it picked and why. Under Best the Roformer models used
+  about 1.5 to 2.3 GB of GPU memory in testing; if another program (a game, a
+  local AI model) leaves less than 3 GB free when a separation starts, the
+  activity log says so, and a separation that runs out of GPU memory explains
+  what to do instead of failing with CUDA's own message.
 
 On a GPU the engine also runs in half precision (fp16), which is about 1.7×
 faster; measured against full precision, the difference was 78 dB below the

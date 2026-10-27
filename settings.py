@@ -20,7 +20,7 @@ APP_NAME = "AudacityQuickDownloader"
 
 PLAYLIST_MODES = {"ask": "Ask each time", "all": "Whole playlist", "one": "Just the track"}
 SEPARATION_QUALITIES = {
-    "auto": "Automatic (Best with a GPU, Fast without)",
+    "auto": "Automatic (picked for this PC)",
     "best": "Best: newest models, maximum overlap",
     "balanced": "Balanced: newest models, about twice as fast",
     "fast": "Fast: classic UVR5 models, good on a CPU",
