@@ -3,6 +3,9 @@
 The screen is kept deliberately quiet: a box to paste into, three chips for
 the choices people change often, the list of downloads, and one line of key
 hints. Everything else lives in Settings (Ctrl+S).
+
+A second tab, Voice datasets, takes an artist's name and links to their
+songs, and keeps only their dry vocals, for training an RVC voice model.
 """
 
 import threading
@@ -14,10 +17,12 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, ProgressBar, RichLog, Static
+from textual.suggester import SuggestFromList
+from textual.widgets import Button, Input, ProgressBar, RichLog, Static, TabbedContent, TabPane
 
 import audacity
 import separation
+import voice
 from jobs import CANCELLED, DONE, FAILED, QUEUED, RUNNING, Runner
 from settings_screen import SettingsScreen
 from sources import SITE_COLORS, identify, split_input
@@ -28,10 +33,11 @@ AUDACITY_POLL_INTERVAL = 4
 
 PLAYLIST_LABELS = {"ask": "Ask", "all": "Whole playlist", "one": "Just the track"}
 STEM_CHOICES = [None] + list(separation.PRESETS)  # None means off
+REVERB_LABELS = {"reverb": "Removed", "off": "Kept"}
 
 LOG_STYLES = {"info": "", "success": "green", "warning": "yellow", "error": "bold red"}
 
-HINTS = "ctrl+s settings  ctrl+o folder  ctrl+q quit"
+HINTS = "ctrl+t switch tab  ctrl+s settings  ctrl+o folder  ctrl+q quit"
 JOB_HINTS = "c cancel  r retry  o show  del remove  esc back"
 
 WELCOME = """\
@@ -39,6 +45,13 @@ WELCOME = """\
 
 [dim]YouTube · SoundCloud · Bandcamp · Apple Music · and 1,000+ more
 Type a song name to search, or give a file or folder on this PC[/dim]"""
+
+VOICE_WELCOME = """\
+[b]Collect an artist's vocals for training a voice model[/b]
+
+[dim]Name the artist, then paste YouTube or Apple Music playlists, albums or songs.
+Only their dry lead vocals are kept, all in one folder, ready for RVC.
+Songs already in the folder are skipped, so a playlist can be run again as it grows.[/dim]"""
 
 
 def format_speed(speed):
@@ -224,6 +237,8 @@ class JobCard(Vertical, can_focus=True):
                 text.append("  ·  ", style="dim")
                 text.append(part, style=style)
 
+        if job.voice:
+            add(f"vocals of {job.voice}", "")
         if job.state == QUEUED:
             add("waiting for a free slot")
         elif job.state == RUNNING:
@@ -292,18 +307,44 @@ class DownloaderApp(App):
         width: auto;
     }
 
-    #url {
+    #tabs {
+        height: 1fr;
+        margin-top: 1;
+    }
+    #tabs > ContentSwitcher {
+        height: 1fr;
+    }
+    #tabs TabPane {
+        height: 1fr;
+        padding: 0;
+    }
+    #tabs Tabs {
+        margin: 0 2;
+    }
+
+    .link {
         margin: 1 2 0 2;
         padding: 0 1;
         border: round $panel-lighten-2;
         background: $background;
     }
-    #url:focus {
+    .link:focus {
         border: round $accent;
         background-tint: $foreground 0%;
     }
+    #voice-inputs {
+        height: auto;
+    }
+    #artist {
+        width: 34;
+        margin: 1 0 0 2;
+    }
+    #voice-url {
+        width: 1fr;
+        margin: 1 2 0 1;
+    }
 
-    #chips {
+    .chips {
         height: 1;
         margin: 1 3;
     }
@@ -325,7 +366,7 @@ class DownloaderApp(App):
         background: $primary 55%;
         color: $text;
     }
-    #folder {
+    .folder {
         width: 1fr;
         text-align: right;
         color: $text-disabled;
@@ -333,12 +374,12 @@ class DownloaderApp(App):
         text-overflow: ellipsis;
     }
 
-    #jobs {
+    .jobs {
         height: 1fr;
         padding: 0 2;
         scrollbar-size-vertical: 1;
     }
-    #empty {
+    .empty {
         width: 100%;
         height: auto;
         margin-top: 4;
@@ -458,14 +499,16 @@ class DownloaderApp(App):
         Binding("ctrl+o", "open_folder", "Open folder"),
         Binding("ctrl+l", "toggle_log", "Log"),
         Binding("ctrl+r", "clear_finished", "Clear finished"),
+        Binding("ctrl+t", "switch_tab", "Switch tab"),
         Binding("escape", "focus_input", "Back", show=False),
     ]
 
-    def __init__(self, settings, updater, initial_urls=(), first_run=False):
+    def __init__(self, settings, updater, initial_urls=(), first_run=False, voice=None):
         super().__init__()
         self.settings = settings
         self.updater = updater
         self.initial_urls = list(initial_urls)
+        self.initial_voice = voice
         self.first_run = first_run
         self.runner = Runner(settings, updater, ask=self.ask_from_thread)
         self.engine_installer = None
@@ -481,14 +524,35 @@ class DownloaderApp(App):
         with Horizontal(id="topbar"):
             yield Static("[b]♫  Quick Downloader[/b]  [dim]for Audacity[/dim]", id="brand")
             yield Static(id="status")
-        yield UrlInput(placeholder="Paste a link, search for a song, or drop in a file or folder", id="url")
-        with Horizontal(id="chips"):
-            yield Chip("toggle_import", id="chip-import")
-            yield Chip("cycle_stems", id="chip-stems")
-            yield Chip("cycle_playlists", id="chip-playlists")
-            yield Static(id="folder")
-        with VerticalScroll(id="jobs"):
-            yield Static(WELCOME, id="empty")
+        with TabbedContent(id="tabs"):
+            with TabPane("Downloads", id="tab-downloads"):
+                yield UrlInput(
+                    placeholder="Paste a link, search for a song, or drop in a file or folder",
+                    id="url",
+                    classes="link",
+                )
+                with Horizontal(classes="chips"):
+                    yield Chip("toggle_import", id="chip-import")
+                    yield Chip("cycle_stems", id="chip-stems")
+                    yield Chip("cycle_playlists", id="chip-playlists")
+                    yield Static(id="folder", classes="folder")
+                with VerticalScroll(id="jobs", classes="jobs"):
+                    yield Static(WELCOME, id="empty", classes="empty")
+            with TabPane("Voice datasets", id="tab-voice"):
+                with Horizontal(id="voice-inputs"):
+                    yield Input(placeholder="Artist (names the folder)", id="artist", classes="link")
+                    yield UrlInput(
+                        placeholder="Paste their playlists, albums or songs, or type a song name",
+                        id="voice-url",
+                        classes="link",
+                    )
+                with Horizontal(classes="chips"):
+                    yield Chip("toggle_lead_only", id="chip-lead")
+                    yield Chip("cycle_reverb", id="chip-reverb")
+                    yield Chip("toggle_trim", id="chip-trim")
+                    yield Static(id="voice-folder", classes="folder")
+                with VerticalScroll(id="voice-jobs", classes="jobs"):
+                    yield Static(VOICE_WELCOME, id="voice-empty", classes="empty")
         log = RichLog(id="log", wrap=True, markup=False, max_lines=500)
         log.border_title = "Activity"
         yield log
@@ -499,8 +563,13 @@ class DownloaderApp(App):
     def on_mount(self):
         # Kept rather than looked up each tick: the timers can fire while the
         # app is closing, after the widgets have gone.
+        self.tabs = self.query_one("#tabs", TabbedContent)
         self.jobs_view = self.query_one("#jobs")
         self.empty_view = self.query_one("#empty")
+        self.voice_jobs_view = self.query_one("#voice-jobs")
+        self.voice_empty_view = self.query_one("#voice-empty")
+        self.voice_folder_view = self.query_one("#voice-folder", Static)
+        self.artist_input = self.query_one("#artist", Input)
         self.log_view = self.query_one("#log", RichLog)
         self.status_view = self.query_one("#status", Static)
         self.activity_view = self.query_one("#activity", Static)
@@ -510,8 +579,11 @@ class DownloaderApp(App):
         self.set_interval(REFRESH_INTERVAL, self.refresh_jobs)
         self.set_interval(AUDACITY_POLL_INTERVAL, self.poll_audacity)
         self.poll_audacity()
+        if self.initial_voice:
+            self.artist_input.value = self.initial_voice
+            self.tabs.active = "tab-voice"
         for url in self.initial_urls:
-            self.queue(url)
+            self.queue(url, voice=self.initial_voice)
         if self.first_run:
             self.action_settings()
 
@@ -524,12 +596,33 @@ class DownloaderApp(App):
         for entry in entries:
             self.queue(entry)
 
-    def queue(self, text):
+    @on(Input.Submitted, "#artist")
+    def artist_submitted(self):
+        self.query_one("#voice-url").focus()
+
+    @on(Input.Changed, "#artist")
+    def artist_changed(self):
+        self.show_voice_folder()
+
+    @on(Input.Submitted, "#voice-url")
+    def voice_submitted(self, event):
+        artist = " ".join(self.artist_input.value.split())
+        if not voice.folder_name(artist):
+            self.notify("Type the artist's name first: their vocals are saved in a folder named after them.",
+                        title="Who is singing?", severity="warning")
+            self.artist_input.focus()
+            return
+        entries = split_input(event.value)
+        event.input.clear()
+        for entry in entries:
+            self.queue(entry, voice=artist)
+
+    def queue(self, text, voice=None):
         source = identify(text)
         if source.ambiguous_playlist and self.settings.playlist is None:
 
             def answered(whole):
-                self.runner.add(text, playlist=whole)
+                self.runner.add(text, playlist=whole, voice=voice)
                 self.refresh_jobs()
 
             self.push_screen(
@@ -543,7 +636,7 @@ class DownloaderApp(App):
                 answered,
             )
             return
-        self.runner.add(text)
+        self.runner.add(text, voice=voice)
         self.refresh_jobs()
 
     # -- the chips --------------------------------------------------------------
@@ -588,6 +681,52 @@ class DownloaderApp(App):
         )
         self.query_one("#folder", Static).update(f"→ {describe_path(settings.downloads)}")
 
+        self.query_one("#chip-lead", Chip).show(
+            "Backing vocals", "Removed" if settings.voice_lead_only else "Kept", settings.voice_lead_only
+        )
+        self.query_one("#chip-reverb", Chip).show(
+            "Reverb", REVERB_LABELS.get(settings.voice_reverb, "Removed"), settings.voice_reverb != "off"
+        )
+        self.query_one("#chip-trim", Chip).show(
+            "Silence", "Trimmed" if settings.voice_trim_silence else "Kept", settings.voice_trim_silence
+        )
+        self.artist_input.suggester = SuggestFromList(voice.artist_folders(settings.voices), case_sensitive=False)
+        self.show_voice_folder()
+
+    def voice_folder(self):
+        """The current artist's folder, or None if no artist is typed in."""
+        name = voice.folder_name(self.artist_input.value)
+        return self.settings.voices / name if name else None
+
+    def show_voice_folder(self):
+        """Where the vocals go, and how much the artist has so far."""
+        folder = self.voice_folder()
+        if folder is None:
+            self.voice_folder_view.update(f"→ {describe_path(self.settings.voices)}")
+            return
+        count, seconds = voice.stats(folder)
+        text = f"→ {describe_path(folder)}"
+        if count:
+            # First, so a long path cannot push it out of sight.
+            text = f"{count} song{'' if count == 1 else 's'}, {voice.format_minutes(seconds)}  {text}"
+        self.voice_folder_view.update(text)
+
+    # The Voice tab's chips.
+
+    def action_toggle_lead_only(self):
+        self.settings.voice_lead_only = not self.settings.voice_lead_only
+        self.show_chips()
+
+    def action_cycle_reverb(self):
+        modes = list(REVERB_LABELS)
+        index = modes.index(self.settings.voice_reverb) if self.settings.voice_reverb in modes else 0
+        self.settings.voice_reverb = modes[(index + 1) % len(modes)]
+        self.show_chips()
+
+    def action_toggle_trim(self):
+        self.settings.voice_trim_silence = not self.settings.voice_trim_silence
+        self.show_chips()
+
     def show_settings(self):
         """Make the chips and theme match ``self.settings``."""
         if self.settings.theme in self.available_themes:
@@ -622,14 +761,15 @@ class DownloaderApp(App):
     # -- keeping the screen current -------------------------------------------
 
     def refresh_jobs(self):
-        container = self.jobs_view
-        if not container.is_attached:  # the app is closing
+        if not self.jobs_view.is_attached:  # the app is closing
             return
         jobs = self.runner.jobs
 
         for job in jobs:
             card = self.cards.get(job.id)
             if card is None:
+                # Voice dataset jobs are listed on their own tab.
+                container = self.voice_jobs_view if job.voice else self.jobs_view
                 card = self.cards[job.id] = JobCard(job)
                 container.mount(card, before=0)
                 container.scroll_home(animate=False)
@@ -639,8 +779,13 @@ class DownloaderApp(App):
                 self.announced.add(job.id)
                 if job.state == FAILED:
                     self.notify(job.message, title=job.label, severity="error", timeout=8, markup=False)
+                if job.voice:
+                    self.show_chips()  # a new artist folder, or more minutes
 
-        self.empty_view.display = not jobs
+        self.empty_view.display = not any(not job.voice for job in jobs)
+        self.voice_empty_view.display = not any(job.voice for job in jobs)
+        if any(job.voice and job.state == RUNNING for job in jobs):
+            self.show_voice_folder()
         self.drain_log()
         self.show_status()
         self.show_activity()
@@ -766,12 +911,31 @@ class DownloaderApp(App):
     def action_toggle_log(self):
         self.log_view.toggle_class("-visible")
 
+    @property
+    def on_voice_tab(self):
+        return self.tabs.active == "tab-voice"
+
     def action_open_folder(self):
-        self.settings.downloads.mkdir(parents=True, exist_ok=True)
-        reveal(self.settings.downloads)
+        folder = self.settings.downloads
+        if self.on_voice_tab:
+            folder = self.voice_folder() or self.settings.voices
+        folder.mkdir(parents=True, exist_ok=True)
+        reveal(folder)
+
+    def action_switch_tab(self):
+        self.tabs.active = "tab-downloads" if self.on_voice_tab else "tab-voice"
+
+    @on(TabbedContent.TabActivated, "#tabs")
+    def tab_switched(self):
+        self.action_focus_input()
 
     def action_focus_input(self):
-        self.query_one("#url").focus()
+        if not self.on_voice_tab:
+            self.query_one("#url").focus()
+        elif self.artist_input.value.strip():
+            self.query_one("#voice-url").focus()
+        else:
+            self.artist_input.focus()
 
     def action_focus_next_card(self):
         self._move_card_focus(1)
@@ -780,7 +944,8 @@ class DownloaderApp(App):
         self._move_card_focus(-1)
 
     def _move_card_focus(self, step):
-        cards = list(self.query(JobCard))
+        view = self.voice_jobs_view if self.on_voice_tab else self.jobs_view
+        cards = list(view.query(JobCard))
         if not cards:
             return
         focused = self.focused
@@ -815,8 +980,8 @@ class DownloaderApp(App):
         )
 
 
-def run(settings, updater, urls=(), first_run=False):
-    app = DownloaderApp(settings, updater, urls, first_run)
+def run(settings, updater, urls=(), first_run=False, voice=None):
+    app = DownloaderApp(settings, updater, urls, first_run, voice)
     try:
         app.run()
     finally:

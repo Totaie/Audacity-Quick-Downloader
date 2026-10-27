@@ -82,22 +82,22 @@ class PlainPrinter:
         self.show()
 
 
-def plain_add(runner, text):
+def plain_add(runner, text, voice=None):
     source = identify(text)
     playlist = runner.settings.playlist
     if source.ambiguous_playlist and playlist is None:
         playlist = ask_yes_no("That link is part of a playlist. Download the whole playlist?")
-    return runner.add(text, playlist)
+    return runner.add(text, playlist, voice)
 
 
-def run_plain(settings, updater, urls):
+def run_plain(settings, updater, urls, voice=None):
     runner = Runner(settings, updater, ask=lambda question, default=False: ask_yes_no(question, default))
     printer = PlainPrinter(runner)
     try:
         if urls:
             for url in urls:
                 for entry in split_input(url):
-                    plain_add(runner, entry)
+                    plain_add(runner, entry, voice)
             printer.wait()
             return 1 if any(job.state != DONE for job in runner.jobs) else 0
 
@@ -111,7 +111,7 @@ def run_plain(settings, updater, urls):
             if text.lower() in QUIT_WORDS:
                 return 0
             for entry in split_input(text):
-                plain_add(runner, entry)
+                plain_add(runner, entry, voice)
             printer.wait()
     except KeyboardInterrupt:
         print("\nCancelled.")
@@ -182,6 +182,12 @@ def parse_arguments(argv=None):
     )
     parser.add_argument("--preset", choices=PRESETS, help="which stems to split into")
     parser.add_argument("--stems-dir", type=Path, help="where to save separated stems")
+    parser.add_argument(
+        "--voice",
+        metavar="ARTIST",
+        help="keep only the artist's dry vocals, in a voice dataset folder named after them (for RVC)",
+    )
+    parser.add_argument("--voice-dir", type=Path, help="where to save voice datasets")
 
     parser.add_argument("--no-launch", action="store_true", help="never start Audacity automatically")
     parser.add_argument("--no-import", action="store_true", help="do not touch Audacity at all")
@@ -210,6 +216,7 @@ def apply_arguments(settings, options):
         "separate": options.separate,
         "separation_preset": options.preset,
         "separation_dir": options.stems_dir,
+        "voice_dir": options.voice_dir,
     }
     for name, value in overrides.items():
         if value is not None:
@@ -252,11 +259,11 @@ def main(argv=None):
             print("Run: pip install -r requirements.txt")
             print("Falling back to plain output.\n")
         else:
-            return tui.run(settings, updater, options.urls, first_run=first_run)
+            return tui.run(settings, updater, options.urls, first_run=first_run, voice=options.voice)
 
     if first_run:
         settings.save()  # plain mode has no settings screen; start from defaults
-    return run_plain(settings, updater, options.urls)
+    return run_plain(settings, updater, options.urls, options.voice)
 
 
 if __name__ == "__main__":

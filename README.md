@@ -35,6 +35,10 @@ Runs on **Windows** and **Linux** (made on Arch, works on any distribution).
   vocals, or drums, bass and the rest, with the stems saved in their own folder
   and imported into Audacity too. It reuses the models you already downloaded
   in UVR5, and runs on your NVIDIA GPU if you have one. Off by default.
+- **Voice datasets for RVC.** A second tab takes an artist's name and their
+  playlists, albums or songs, and keeps only their dry lead vocals (no
+  instruments, no backing vocals, no reverb) in one folder, ready for training
+  an RVC voice model.
 - **A settings screen** (`Ctrl+S`) for your defaults: where things are saved,
   the audio format and bitrate, Audacity behaviour, separation presets and
   more. They are saved per user, so an update never resets them.
@@ -189,15 +193,15 @@ UVR5, linking them rather than copying so they take no extra space.
 
 The presets use the best models audio-separator can run, chosen from the
 public benchmarks on [MVSEP](https://mvsep.com/quality_checker/multisong_leaderboard).
-To get them all in one go (about 1.2 GB), click **Download all** next to
+To get them all in one go (about 1.7 GB), click **Download all** next to
 **Models** in Settings once the engine is set up. Otherwise each is downloaded
 the first time a preset needs it. If UVR5 already has a model, its copy is used
 instead.
 
 | Preset | Stems | Best / Balanced | Fast |
 | --- | --- | --- | --- |
-| Vocals + Instrumental | Vocals, Instrumental | BS-Roformer Resurrection | MDX-Net Inst HQ 3 |
-| Instrumental + Lead + Backing vocals | Instrumental, Lead Vocals, Backing Vocals | BS-Roformer Resurrection, then BS-Roformer Karaoke | Inst HQ 3, then KARA 2 |
+| Vocals + Instrumental | Vocals, Instrumental | BS-Roformer Leap | MDX-Net Inst HQ 3 |
+| Instrumental + Lead + Backing vocals | Instrumental, Lead Vocals, Backing Vocals | BS-Roformer Leap, then BS-Roformer Karaoke | Inst HQ 3, then KARA 2 |
 | Vocals, Drums, Bass, Other | 4 stems | BS-Roformer SW (guitar and piano folded into Other) | Demucs v4 htdemucs |
 | Six stems | Vocals, Drums, Bass, Guitar, Piano, Other | BS-Roformer SW | Demucs v4 htdemucs_6s |
 | All stems | Lead and Backing Vocals, Drums, Bass, Guitar, Piano, Other | BS-Roformer SW, then BS-Roformer Karaoke | htdemucs, then KARA 2 (no guitar/piano) |
@@ -206,9 +210,22 @@ Why these models (MVSEP scores, SDR in dB, higher is better):
 
 | Model | Scores | Replaces |
 | --- | --- | --- |
-| BS-Roformer "Resurrection" by unwa | vocals 11.36 | MDX-Net Inst HQ 3, htdemucs vocals (about 9–10) |
+| BS-Roformer "Leap" by unwa | vocals 11.72, with the least instrument bleed of the top public models | MDX-Net Inst HQ 3, htdemucs vocals (about 9–10) |
 | BS-Roformer SW (ships with UVR 5.6) | drums 14.11, bass 14.62, vocals 11.30; #1 for guitar, ahead of Logic Pro's stem splitter | Demucs v4 (drums and bass 2–3 dB lower) |
 | BS-Roformer Karaoke by anvuew | lead vocals 10.23, the best public single model | UVR_MDXNET_KARA_2 (about 5.4) |
+| BS-Roformer De-Reverb by anvuew (2026) | best public model in MVSEP's de-reverb comparison | MelBand Roformer De-Reverb, Sucial's De-Reverb-Echo |
+
+Leap and the 2026 De-Reverb are not on audio-separator's own model list, so
+the app fetches them from their authors' Hugging Face pages, with their own
+configs.
+
+These were also checked locally. On 20 one-minute excerpts from the
+MUSDB18-HQ test set, Leap scored 12.1 dB vocals SDR. Leap Xe and anvuew's ft1
+were 0.1 dB higher, but with more instrument bleed, and BS-Roformer
+Resurrection, the previous choice, managed only 6.6 dB as audio-separator
+configures it. On 24 dry studio vocals given real room reverb, studio reverb
+or echo, the 2026 De-Reverb improved SDR by 3.3 dB on average (5.2 dB on
+echo), against 1.8 dB for the MelBand model it replaces.
 
 ### Quality
 
@@ -221,8 +238,17 @@ Why these models (MVSEP scores, SDR in dB, higher is better):
   close in quality.
 - **Fast**: the classic UVR5 models. Several times quicker than the Roformer
   models, which is what makes separation practical without an NVIDIA GPU.
-- **Automatic** (the default) picks Best when the engine has a GPU and Fast when
-  it does not.
+- **Automatic** (the default) looks at your PC and picks:
+  - **Best** on an NVIDIA GPU with 6 GB or more, RTX 20 series or newer;
+  - **Balanced** on a 4 to 6 GB GPU, or an older GTX card, where half the
+    overlap keeps it quick;
+  - **Fast** with less than 4 GB, or with no NVIDIA GPU at all.
+
+  Settings shows what it picked and why. Under Best the Roformer models used
+  about 1.5 to 2.3 GB of GPU memory in testing; if another program (a game, a
+  local AI model) leaves less than 3 GB free when a separation starts, the
+  activity log says so, and a separation that runs out of GPU memory explains
+  what to do instead of failing with CUDA's own message.
 
 On a GPU the engine also runs in half precision (fp16), which is about 1.7×
 faster; measured against full precision, the difference was 78 dB below the
@@ -252,6 +278,55 @@ bitrate, with the song's tags (titled like `Song (Vocals)`) and cover art. The
 **Separate stems** tick box and preset list above the download list change it
 just for this session. Separations run one at a time; downloads carry on in
 parallel.
+
+## Voice datasets for RVC
+
+The **Voice datasets** tab (`Ctrl+T` switches tabs) builds training data for
+an [RVC] voice model. Type the artist's name in the left box, then paste their
+YouTube or Apple Music playlists, albums or songs (or song names, or files on
+this PC) in the right one. Every song is split with the separation engine, so
+set that up first ([above](#3-set-up-the-separation-engine)), and only the
+singing is kept:
+
+1. **Vocals** are separated from the music (BS-Roformer Leap).
+2. **Backing vocals** (harmonies, doubles, ad-libs) are split off and thrown
+   away, leaving the lead singer (BS-Roformer Karaoke).
+3. **Reverb and echo** are taken out (BS-Roformer De-Reverb by anvuew, 2026).
+4. **Long pauses** and instrumental breaks are cut down to under half a second.
+
+Each song ends up as one mono 16-bit WAV in
+`Downloads/Voice Datasets/<Artist>/`; the downloaded songs themselves are
+deleted once their vocals are saved (files from this PC are left alone). Point
+RVC's training at the artist's folder. Next to the chips you can see how many
+songs and minutes the artist has so far: RVC wants roughly 10 to 30 minutes
+of clean singing, and more helps up to about an hour.
+
+Songs whose vocals are already in the folder are skipped (YouTube ones before
+they are even downloaded), so you can paste the same playlist again after it
+grows, or after cancelling half way. The artist box suggests the artists you
+already have folders for.
+
+The three chips change this session only; Settings has the defaults:
+
+- **Backing vocals**: removed, or kept (skips step 2).
+- **Reverb**: removed (echo too), or kept.
+- **Silence**: trimmed, or kept.
+
+The **Quality** setting applies here too. Fast swaps each model for a classic
+UVR5 one (MDX-Net Inst HQ 3, MDX-Net Karaoke 2, VR DeEcho-DeReverb). Best runs
+three Roformer models per song, which takes a minute or two a song on a
+recent NVIDIA GPU, so leave a long playlist running.
+
+For the cleanest model, feed it songs where the artist sings alone: features
+with other singers end up in the dataset too (delete those files), and very
+heavily processed vocals (autotune, distortion, vocoders) train a model that
+sounds that way. Live recordings are worth leaving out.
+
+From the command line:
+
+```bash
+python main.py --voice "Artist Name" "https://www.youtube.com/playlist?list=..."
+```
 
 ## Usage
 
@@ -298,8 +373,9 @@ into lead and backing.
 | `Delete` | Remove a finished download from the list. |
 | `Ctrl+S` | Settings. |
 | `Ctrl+L` | Show or hide the activity log. |
-| `Ctrl+O` | Open the downloads folder. |
+| `Ctrl+O` | Open the downloads folder (on the Voice tab, the artist's folder). |
 | `Ctrl+R` | Clear finished downloads from the list. |
+| `Ctrl+T` | Switch between the Downloads and Voice datasets tabs. |
 | `Ctrl+Q` | Quit. |
 
 The line at the bottom always shows the keys that apply right now.
@@ -316,6 +392,7 @@ own, and updating the app never resets them.
 | Downloads | Download folder, audio format (MP3, M4A, Opus, Ogg, FLAC, WAV), bitrate, playlist behaviour, cover art. |
 | Audacity | Import automatically, start Audacity automatically, turn on its scripting module. |
 | Stem separation | Set up or remove the engine, download every model in one go, separate automatically, preset, quality, stems folder, import the original and/or the stems, GPU or CPU, UVR5's folder. Stems use the Downloads format and bitrate. |
+| Voice datasets | Where artist folders go, and whether to remove backing vocals, reverb and echo, and long pauses. |
 | Cookies | Apple Music cookies file, cookies for other sites. |
 | Appearance | Colour theme. |
 
@@ -366,6 +443,8 @@ These override your saved settings for one run; they never change them.
 | `--separate` / `--no-separate` | Split into stems with UVR5's models, or don't. |
 | `--preset NAME` | `vocals_instrumental`, `lead_backing`, `four_stems`, `all_stems` or `six_stems`. |
 | `--stems-dir DIR` | Where to save separated stems. |
+| `--voice ARTIST` | Keep only the artist's dry vocals, in their voice dataset folder (see [Voice datasets](#voice-datasets-for-rvc)). |
+| `--voice-dir DIR` | Where to save voice datasets. |
 | `--cookies FILE` | Apple Music cookies file (default: `cookies.txt` next to the script). |
 | `--site-cookies FILE` | Cookies for yt-dlp, e.g. for age-restricted YouTube videos. `--youtube-cookies` still works too. |
 | `--no-launch` | Never start Audacity automatically. |
@@ -440,6 +519,7 @@ repository, and it should stay that way.
 | `applemusicdownloader.py` | gamdl wrapper plus format conversion. |
 | `separation.py` | Finds UVR5, installs the separation engine, runs separations. |
 | `separator_worker.py` | Runs one separation inside `.venv-separator`. |
+| `voice.py` | The Voice datasets tab: its model chain, artist folders and finishing the vocals. |
 | `audacity.py` | Finds, starts and talks to Audacity. |
 | `updater.py` | Background update check for yt-dlp and gamdl. |
 | `utils.py` | Scratch folders, safe moves, progress reporting, shared errors. |
@@ -563,4 +643,5 @@ MIT — see [LICENSE](LICENSE).
 [yt-dlp]: https://github.com/yt-dlp/yt-dlp
 [Textual]: https://textual.textualize.io/
 [UVR5]: https://github.com/Anjok07/ultimatevocalremovergui
+[RVC]: https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI
 [audio-separator]: https://github.com/karaokenerds/python-audio-separator

@@ -58,6 +58,39 @@ def patch_progress_bars():
     tqdm.auto.tqdm = Reporting
 
 
+def use_extra_models():
+    """Let audio-separator load the models in separation.EXTRA_MODELS.
+
+    It only knows the models on its own list, and newer community ones (from
+    Hugging Face) are not on it yet. They are Roformer checkpoints like the
+    ones it does list, so it runs them fine once it has the file and its yaml
+    config; this fetches both on first use and hands them over.
+    """
+    from audio_separator.separator import Separator
+
+    from separation import EXTRA_MODELS  # plain Python, safe to import here
+
+    listed = Separator.download_model_files
+
+    def download_model_files(self, filename):
+        urls = EXTRA_MODELS.get(filename)
+        if urls is None:
+            return listed(self, filename)
+        model = Path(self.model_file_dir) / filename
+        config = model.with_suffix(".yaml")
+        for url, target in ((urls["config"], config), (urls["model"], model)):
+            if not target.exists():
+                # Through a .part file, so a cancelled download is never
+                # mistaken for a finished one next time.
+                partial = target.with_name(target.name + ".part")
+                partial.unlink(missing_ok=True)
+                self.download_file_if_not_exists(url, str(partial))
+                partial.replace(target)
+        return filename, "MDXC", model.stem, str(model), str(config)
+
+    Separator.download_model_files = download_model_files
+
+
 def check():
     import torch
     from importlib.metadata import version
@@ -101,6 +134,7 @@ def onnx_runs_on_cuda(onnxruntime):
 
 def run(job):
     patch_progress_bars()
+    use_extra_models()
     from audio_separator.separator import Separator
 
     output_dir = Path(job["output_dir"])
@@ -205,6 +239,7 @@ def merge(paths, destination):
 def download(model_dir, models):
     """Fetch models ahead of time, without loading them."""
     patch_progress_bars()
+    use_extra_models()
     from audio_separator.separator import Separator
 
     separator = Separator(log_level=logging.WARNING, model_file_dir=model_dir)

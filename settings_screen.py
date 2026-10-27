@@ -15,12 +15,14 @@ from textual.widgets import Button, Checkbox, Input, ProgressBar, Select, Static
 
 import audacity
 import separation
+import voice
 from settings import (
     AUDIO_FORMATS,
     BITRATES,
     DEVICES,
     PLAYLIST_MODES,
     SEPARATION_QUALITIES,
+    VOICE_REVERB,
     Settings,
     settings_path,
 )
@@ -280,6 +282,15 @@ class SettingsScreen(Screen):
                 yield row("UVR5 folder", *path_input("uvr_path", s.uvr_path, "Found automatically"))
 
             with Vertical(classes="section") as section:
+                section.border_title = "Voice datasets (for training RVC)"
+                yield row("Save vocals to", *path_input("voice_dir", s.voice_dir, str(s.voices)))
+                yield hint("One folder per artist inside it. Point RVC's training at the artist's folder.")
+                yield row("Backing vocals", Toggle("Remove them, keeping only the lead singer", s.voice_lead_only, id="f-voice_lead_only"))
+                yield row("Reverb", self._select("voice_reverb", VOICE_REVERB))
+                yield row("Silence", Toggle("Cut long pauses and instrumental breaks", s.voice_trim_silence, id="f-voice_trim_silence"))
+                yield hint(id="voice-hint")
+
+            with Vertical(classes="section") as section:
                 section.border_title = "Cookies (optional)"
                 yield row("Apple Music cookies", *path_input("apple_cookies", s.apple_cookies, "cookies.txt next to main.py", kind="file"))
                 yield row("Other sites' cookies", *path_input("site_cookies", s.site_cookies, "None", kind="file"))
@@ -382,11 +393,27 @@ class SettingsScreen(Screen):
         else:
             text += ", already downloaded."
         if self.value("separation_quality") == "auto":
-            text += f" Automatic means {separation.QUALITY_LEVELS[quality]['label']} here."
+            _, reason = separation.recommended_quality(device)
+            text += f" Automatic picks {separation.QUALITY_LEVELS[quality]['label']} on this PC: {reason}."
         self.set_hint("#preset-hint", text)
 
         downloads = Path(self.value("download_dir") or default_downloads_dir())
         self.query_one("#f-separation_dir", Input).placeholder = str(downloads / "Separated")
+        self.query_one("#f-voice_dir", Input).placeholder = str(downloads / "Voice Datasets")
+
+        steps = voice.preset(self.value("voice_lead_only"), self.value("voice_reverb")).steps_for(quality)
+        models = [step.model for step in steps]
+        text = (
+            f"Each song goes through {', then '.join(Path(m).stem for m in models)}, and is saved as a mono WAV. "
+            f"Uses the Quality setting above ({separation.QUALITY_LEVELS[quality]['label']} here)"
+        )
+        missing = [m for m in models if not (separation.MODEL_CACHE / m).exists() and not (uvr and uvr.find_model(m))]
+        if missing:
+            size = sum(separation.MODEL_SIZES_MB.get(m, 0) for m in missing)
+            text += f"; about {size} MB of models is downloaded the first time."
+        else:
+            text += "."
+        self.set_hint("#voice-hint", text)
 
     def set_hint(self, selector, text):
         hint = self.query_one(selector, Static)
@@ -465,6 +492,7 @@ class SettingsScreen(Screen):
         field = self.query_one(f"#f-{name}", Input)
         initial = field.value or field.placeholder
         title = {"download_dir": "Save downloads to", "separation_dir": "Save separated stems to",
+                 "voice_dir": "Save voice datasets to",
                  "uvr_path": "Ultimate Vocal Remover's folder"}.get(name, "Choose a file")
 
         def pick():

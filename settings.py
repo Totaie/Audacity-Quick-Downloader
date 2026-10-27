@@ -20,12 +20,13 @@ APP_NAME = "AudacityQuickDownloader"
 
 PLAYLIST_MODES = {"ask": "Ask each time", "all": "Whole playlist", "one": "Just the track"}
 SEPARATION_QUALITIES = {
-    "auto": "Automatic (Best with a GPU, Fast without)",
+    "auto": "Automatic (picked for this PC)",
     "best": "Best: newest models, maximum overlap",
     "balanced": "Balanced: newest models, about twice as fast",
     "fast": "Fast: classic UVR5 models, good on a CPU",
 }
 DEVICES = {"auto": "Automatic", "gpu": "GPU (NVIDIA)", "cpu": "CPU only"}
+VOICE_REVERB = {"reverb": "Remove reverb and echo", "off": "Keep them"}
 
 
 def config_dir():
@@ -66,6 +67,12 @@ class Settings:
     separation_device: str = "auto"
     uvr_path: str = ""  # blank means find it automatically
 
+    # The Voice tab: dry vocals for training RVC voice models (voice.py)
+    voice_dir: str = ""
+    voice_lead_only: bool = True
+    voice_reverb: str = "reverb"
+    voice_trim_silence: bool = True
+
     # Cookies
     apple_cookies: str = ""
     site_cookies: str = ""
@@ -87,6 +94,13 @@ class Settings:
         return self.downloads / "Separated"
 
     @property
+    def voices(self):
+        """Where voice datasets go, one folder per artist."""
+        if self.voice_dir:
+            return Path(self.voice_dir).expanduser()
+        return self.downloads / "Voice Datasets"
+
+    @property
     def playlist(self):
         """The playlist mode as the rest of the app wants it: None, True or False."""
         return {"ask": None, "all": True, "one": False}.get(self.playlist_mode)
@@ -102,6 +116,7 @@ class Settings:
             "playlist_mode": PLAYLIST_MODES,
             "separation_device": DEVICES,
             "separation_quality": SEPARATION_QUALITIES,
+            "voice_reverb": VOICE_REVERB,
         }
         for name, allowed in choices.items():
             if getattr(self, name) not in allowed:

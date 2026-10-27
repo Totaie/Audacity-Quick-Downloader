@@ -11,6 +11,7 @@ changing a setting affects new downloads without upsetting running ones.
 import copy
 import itertools
 import queue
+import shutil
 import threading
 import time
 from dataclasses import dataclass, field
@@ -18,9 +19,10 @@ from pathlib import Path
 
 import audacity
 import separation
+import voice
 from applemusicdownloader import DEFAULT_COOKIES, download_apple_music
 from sources import identify, local_audio
-from utils import Cancelled, DownloadError, Reporter, describe_path
+from utils import Cancelled, DownloadError, Reporter, describe_path, temp_workspace, unique_path
 from ytdlpdownloader import download_audio
 
 WORKERS = 3
@@ -39,6 +41,7 @@ class Job:
     text: str
     settings: object  # a copy of settings.Settings
     playlist: bool = False
+    voice: str = None  # the artist, for the Voice tab: keep only their vocals
 
     state: str = QUEUED
     stage: str = "Queued"
@@ -73,7 +76,7 @@ class Job:
     @property
     def import_into_audacity(self):
         s = self.settings
-        return s.import_to_audacity and (s.import_original or (s.separate and s.import_stems))
+        return not self.voice and s.import_to_audacity and (s.import_original or (s.separate and s.import_stems))
 
     @property
     def label(self):
@@ -171,11 +174,15 @@ class Runner:
         self.uvr = separation.find_uvr(self.settings.uvr_path)
         return self.uvr
 
-    def add(self, text, playlist=None):
-        """Queue ``text`` (a link or a search) and return its Job."""
+    def add(self, text, playlist=None, voice=None):
+        """Queue ``text`` (a link or a search) and return its Job.
+
+        With ``voice`` (an artist's name) only the vocals are kept, in that
+        artist's voice dataset folder.
+        """
         if playlist is None:
             playlist = bool(self.settings.playlist)
-        job = Job(next(self._ids), text, copy.copy(self.settings), playlist=playlist)
+        job = Job(next(self._ids), text, copy.copy(self.settings), playlist=playlist, voice=voice)
         self.jobs.append(job)
         if not job.source.supported:
             self._finish(job, FAILED, job.source.problem)
@@ -184,7 +191,7 @@ class Runner:
         return job
 
     def retry(self, job):
-        return self.add(job.text, job.playlist)
+        return self.add(job.text, job.playlist, job.voice)
 
     def cancel(self, job):
         if job.finished_state:
@@ -251,6 +258,9 @@ class Runner:
             while not self.updater.wait(0.2):
                 if job.cancel_event.is_set():
                     return self._finish(job, CANCELLED, "Cancelled.")
+
+        if job.voice:
+            return self._run_voice(job)
 
         # Without Audacity this is just a downloader; say so once, not after a wait.
         if job.import_into_audacity and audacity.find_audacity() is None:
@@ -319,8 +329,12 @@ class Runner:
             text += ", but not everything was imported into Audacity"
         self._finish(job, DONE, text + ".")
 
-    def _download(self, job):
+    def _download(self, job, output_dir=None, audio_format=None, thumbnail=None, skip=None):
+        """Download the job's link. The arguments override the job's settings."""
         settings = job.settings
+        output_dir = output_dir or settings.downloads
+        audio_format = audio_format or settings.audio_format
+        thumbnail = settings.embed_thumbnail if thumbnail is None else thumbnail
         source = job.source
         if source.kind == "local":
             # Nothing to download: use the files where they are.
@@ -336,23 +350,137 @@ class Runner:
         if source.kind == "apple":
             return download_apple_music(
                 source.url,
-                output_dir=settings.downloads,
+                output_dir=output_dir,
                 cookies=settings.apple_cookies or DEFAULT_COOKIES,
                 reporter=reporter,
-                audio_format=settings.audio_format,
+                audio_format=audio_format,
                 bitrate=settings.bitrate,
             )
         return download_audio(
             source.url,
-            output_dir=settings.downloads,
+            output_dir=output_dir,
             # A search is technically a one-item playlist.
             playlist=job.playlist or source.kind == "search",
             quality=settings.bitrate,
             cookies=settings.site_cookies or None,
-            thumbnail=settings.embed_thumbnail,
+            thumbnail=thumbnail,
             reporter=reporter,
-            audio_format=settings.audio_format,
+            audio_format=audio_format,
+            skip=skip,
         )
+
+    def _run_voice(self, job):
+        """The Voice tab: keep only the artist's dry vocals, in their folder.
+
+        Songs are downloaded losslessly into a scratch folder inside the
+        artist's, separated one by one, and deleted once their vocals are
+        saved. Songs already in the folder are skipped, so the same playlist
+        can be run again after it grows.
+        """
+        settings = job.settings
+        if not voice.folder_name(job.voice):
+            return self._finish(job, FAILED, "The artist's name has nothing in it that can name a folder.")
+        folder = settings.voices / voice.folder_name(job.voice)
+        if separation.engine_info() is None:
+            return self._finish(job, FAILED, "Set up the separation engine in Settings (Ctrl+S) first.")
+        folder.mkdir(parents=True, exist_ok=True)
+
+        known = voice.existing_keys(folder)
+        skipped = set()
+
+        def already_done(title):
+            key = voice.match_key(title)
+            if key not in known:
+                return False
+            if key not in skipped:
+                skipped.add(key)
+                self.log(f"#{job.id} Skipped {title}: it is already in {folder.name}'s folder")
+            return True
+
+        steps = voice.preset(settings.voice_lead_only, settings.voice_reverb)
+        saved, seconds = [], 0.0
+        with temp_workspace(folder) as work:
+            try:
+                # FLAC: lossless, at half the size of WAV for a long playlist.
+                files = self._download(job, output_dir=work, audio_format="flac", thumbnail=False, skip=already_done)
+            except Cancelled:
+                return self._finish(job, CANCELLED, "Cancelled.")
+            except DownloadError as error:
+                if not skipped:  # rather than "every song was skipped"
+                    return self._finish(job, FAILED, str(error))
+                files = []
+
+            for number, song in enumerate(files, 1):
+                if job.cancel_event.is_set():
+                    break
+                if len(files) > 1:
+                    job.index, job.total, job.title = number, len(files), song.stem
+                if self._separation_lock.locked():
+                    self._set_stage(job, "Waiting to separate")
+                with self._separation_lock:
+                    # Checked again here: another job may have just done this
+                    # song, and Apple Music and local files are not filtered
+                    # before they are downloaded.
+                    known = voice.existing_keys(folder)
+                    if already_done(song.stem):
+                        continue
+                    job.step = None
+                    self._set_stage(job, "Separating")
+                    try:
+                        stems = separation.separate(
+                            song,
+                            work,
+                            preset=steps,
+                            audio_format="wav",
+                            cover_art=False,
+                            quality=settings.separation_quality,
+                            device=settings.separation_device,
+                            uvr=self.uvr,
+                            reporter=SeparationReporter(job, self.log),
+                        )
+                    except Cancelled:
+                        break
+                    except separation.SeparationError as error:
+                        self._warn(job, f"{song.stem}: {error}")
+                        continue
+                    finally:
+                        job.step = None
+
+                self._set_stage(job, "Saving vocals")
+                vocals = stems["Vocals"]
+                destination = unique_path(folder / f"{song.stem}.wav")
+                try:
+                    seconds += voice.finish(vocals, destination, settings.voice_trim_silence)
+                except DownloadError as error:
+                    self._warn(job, f"{song.stem}: {error}")
+                    continue
+                finally:
+                    # The separation's own folder, and the song if it was
+                    # downloaded (local files are left where they are).
+                    shutil.rmtree(Path(vocals).parent, ignore_errors=True)
+                    if work in song.parents:
+                        song.unlink(missing_ok=True)
+                saved.append(destination)
+                job.stems.append(destination)
+                job.touch()
+
+        count, total = voice.stats(folder)
+        summary = []
+        if saved:
+            summary.append(
+                f"Saved {voice.format_minutes(seconds)} of vocals from {plural(len(saved), 'song')} "
+                f"to {describe_path(folder)}"
+            )
+        if skipped:
+            summary.append(f"{plural(len(skipped), 'song')} {'was' if len(skipped) == 1 else 'were'} already there")
+        if saved or skipped:
+            summary.append(f"{job.voice} has {voice.format_minutes(total)} in {plural(count, 'song')} now")
+        text = "; ".join(summary) + "." if summary else ""
+        if job.cancel_event.is_set():
+            return self._finish(job, CANCELLED, f"Cancelled. {text}".strip())
+        if not summary:
+            return self._finish(job, FAILED, "No vocals were saved.")
+        self._finish(job, DONE, text)
 
     def _separate(self, job, files, on_stems=None):
         """Split each downloaded file into stems. Returns {song: [stem paths]}.

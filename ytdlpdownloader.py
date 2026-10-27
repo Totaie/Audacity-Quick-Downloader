@@ -183,12 +183,16 @@ def download_audio(
     thumbnail=True,
     reporter=None,
     audio_format="mp3",
+    skip=None,
 ):
     """Download ``url`` and return the audio files saved in ``output_dir``.
 
     Everything is downloaded into a scratch folder first so we know exactly
     which files this run produced, then moved into the output folder without
     overwriting anything that is already there.
+
+    ``skip(title)`` can return True to leave a track out without downloading
+    it, e.g. one that is already done.
     """
     yt_dlp = _import_yt_dlp()
     reporter = reporter or Reporter()
@@ -210,6 +214,14 @@ def download_audio(
             progress_hooks=[on_progress],
             postprocessor_hooks=[on_postprocess],
         )
+        if skip:
+            # yt-dlp skips an entry when this returns a reason. It can ask
+            # more than once about the same entry.
+            def match_filter(info, *, incomplete=False):
+                title = info.get("title")
+                return "already done" if title and skip(title) else None
+
+            options["match_filter"] = match_filter
 
         reporter.stage("Looking it up")
         try:
