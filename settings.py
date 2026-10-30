@@ -27,6 +27,14 @@ SEPARATION_QUALITIES = {
 }
 DEVICES = {"auto": "Automatic", "gpu": "GPU (NVIDIA)", "cpu": "CPU only"}
 VOICE_REVERB = {"reverb": "Remove reverb and echo", "off": "Keep them"}
+VIDEO_QUALITIES = {
+    "best": "Best available (4K and up, may be VP9/AV1)",
+    "2160": "Up to 4K",
+    "1440": "Up to 1440p",
+    "1080": "Up to 1080p (H.264, plays everywhere)",
+    "720": "Up to 720p",
+    "480": "Up to 480p",
+}
 
 
 def config_dir():
@@ -52,6 +60,7 @@ class Settings:
     bitrate: str = "192"
     playlist_mode: str = "ask"
     embed_thumbnail: bool = True
+    detect_bpm: bool = True  # find each song's tempo and save it in its tags
 
     # Audacity
     import_to_audacity: bool = True
@@ -66,6 +75,11 @@ class Settings:
     import_stems: bool = True
     separation_device: str = "auto"
     uvr_path: str = ""  # blank means find it automatically
+
+    # The Videos tab
+    video_dir: str = ""
+    video_quality: str = "1080"
+    video_mp3: bool = True  # also save each video's sound as an MP3
 
     # The Voice tab: dry vocals for training RVC voice models (voice.py)
     voice_dir: str = ""
@@ -94,6 +108,13 @@ class Settings:
         return self.downloads / "Separated"
 
     @property
+    def videos(self):
+        """Where the Videos tab saves. Defaults to a folder inside the downloads folder."""
+        if self.video_dir:
+            return Path(self.video_dir).expanduser()
+        return self.downloads / "Videos"
+
+    @property
     def voices(self):
         """Where voice datasets go, one folder per artist."""
         if self.voice_dir:
@@ -117,6 +138,7 @@ class Settings:
             "separation_device": DEVICES,
             "separation_quality": SEPARATION_QUALITIES,
             "voice_reverb": VOICE_REVERB,
+            "video_quality": VIDEO_QUALITIES,
         }
         for name, allowed in choices.items():
             if getattr(self, name) not in allowed:

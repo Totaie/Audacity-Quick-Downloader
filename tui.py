@@ -4,7 +4,8 @@ The screen is kept deliberately quiet: a box to paste into, three chips for
 the choices people change often, the list of downloads, and one line of key
 hints. Everything else lives in Settings (Ctrl+S).
 
-A second tab, Voice datasets, takes an artist's name and links to their
+Two more tabs sit beside Downloads: Videos saves .mp4 videos (and their
+sound as MP3s), and Voice datasets takes an artist's name and links to their
 songs, and keeps only their dry vocals, for training an RVC voice model.
 """
 
@@ -34,6 +35,8 @@ AUDACITY_POLL_INTERVAL = 4
 PLAYLIST_LABELS = {"ask": "Ask", "all": "Whole playlist", "one": "Just the track"}
 STEM_CHOICES = [None] + list(separation.PRESETS)  # None means off
 REVERB_LABELS = {"reverb": "Removed", "off": "Kept"}
+VIDEO_QUALITY_LABELS = {"1080": "1080p", "720": "720p", "480": "480p", "best": "Best", "1440": "1440p", "2160": "4K"}
+TABS = ["tab-downloads", "tab-videos", "tab-voice"]
 
 LOG_STYLES = {"info": "", "success": "green", "warning": "yellow", "error": "bold red"}
 
@@ -45,6 +48,12 @@ WELCOME = """\
 
 [dim]YouTube · SoundCloud · Bandcamp · Apple Music · and 1,000+ more
 Type a song name to search, or give a file or folder on this PC[/dim]"""
+
+VIDEO_WELCOME = """\
+[b]Paste a link to save the video[/b]
+
+[dim]YouTube · Vimeo · TikTok · X · Twitch · and 1,000+ more
+Saved as .mp4, with its sound as an .mp3 beside it if you like[/dim]"""
 
 VOICE_WELCOME = """\
 [b]Collect an artist's vocals for training a voice model[/b]
@@ -218,10 +227,14 @@ class JobCard(Vertical, can_focus=True):
             return text
         if job.state == DONE:
             if job.warning:
-                return Text("Done, with a note", style="yellow")
-            if job.imported:
-                return Text("✓ In Audacity", style="green")
-            return Text("✓ Done", style="green")
+                status = Text("Done, with a note", style="yellow")
+            elif job.imported:
+                status = Text("✓ In Audacity", style="green")
+            else:
+                status = Text("✓ Done", style="green")
+            if job.bpm_text:
+                return Text.assemble(("♩ " + job.bpm_text, "bold"), "   ", status)
+            return status
         if job.state == FAILED:
             return Text("✗ Failed", style="red")
         return Text("Cancelled", style="dim")
@@ -503,12 +516,13 @@ class DownloaderApp(App):
         Binding("escape", "focus_input", "Back", show=False),
     ]
 
-    def __init__(self, settings, updater, initial_urls=(), first_run=False, voice=None):
+    def __init__(self, settings, updater, initial_urls=(), first_run=False, voice=None, video=False):
         super().__init__()
         self.settings = settings
         self.updater = updater
         self.initial_urls = list(initial_urls)
         self.initial_voice = voice
+        self.initial_video = video
         self.first_run = first_run
         self.runner = Runner(settings, updater, ask=self.ask_from_thread)
         self.engine_installer = None
@@ -538,6 +552,19 @@ class DownloaderApp(App):
                     yield Static(id="folder", classes="folder")
                 with VerticalScroll(id="jobs", classes="jobs"):
                     yield Static(WELCOME, id="empty", classes="empty")
+            with TabPane("Videos", id="tab-videos"):
+                yield UrlInput(
+                    placeholder="Paste a video link, or search for one",
+                    id="video-url",
+                    classes="link",
+                )
+                with Horizontal(classes="chips"):
+                    yield Chip("toggle_video_mp3", id="chip-video-mp3")
+                    yield Chip("cycle_video_quality", id="chip-video-quality")
+                    yield Chip("cycle_playlists", id="chip-video-playlists")
+                    yield Static(id="video-folder", classes="folder")
+                with VerticalScroll(id="video-jobs", classes="jobs"):
+                    yield Static(VIDEO_WELCOME, id="video-empty", classes="empty")
             with TabPane("Voice datasets", id="tab-voice"):
                 with Horizontal(id="voice-inputs"):
                     yield Input(placeholder="Artist (names the folder)", id="artist", classes="link")
@@ -568,6 +595,8 @@ class DownloaderApp(App):
         self.empty_view = self.query_one("#empty")
         self.voice_jobs_view = self.query_one("#voice-jobs")
         self.voice_empty_view = self.query_one("#voice-empty")
+        self.video_jobs_view = self.query_one("#video-jobs")
+        self.video_empty_view = self.query_one("#video-empty")
         self.voice_folder_view = self.query_one("#voice-folder", Static)
         self.artist_input = self.query_one("#artist", Input)
         self.log_view = self.query_one("#log", RichLog)
@@ -582,8 +611,10 @@ class DownloaderApp(App):
         if self.initial_voice:
             self.artist_input.value = self.initial_voice
             self.tabs.active = "tab-voice"
+        elif self.initial_video:
+            self.tabs.active = "tab-videos"
         for url in self.initial_urls:
-            self.queue(url, voice=self.initial_voice)
+            self.queue(url, voice=self.initial_voice, video=self.initial_video)
         if self.first_run:
             self.action_settings()
 
@@ -595,6 +626,13 @@ class DownloaderApp(App):
         event.input.clear()
         for entry in entries:
             self.queue(entry)
+
+    @on(Input.Submitted, "#video-url")
+    def video_submitted(self, event):
+        entries = split_input(event.value)
+        event.input.clear()
+        for entry in entries:
+            self.queue(entry, video=True)
 
     @on(Input.Submitted, "#artist")
     def artist_submitted(self):
@@ -617,12 +655,12 @@ class DownloaderApp(App):
         for entry in entries:
             self.queue(entry, voice=artist)
 
-    def queue(self, text, voice=None):
+    def queue(self, text, voice=None, video=False):
         source = identify(text)
         if source.ambiguous_playlist and self.settings.playlist is None:
 
             def answered(whole):
-                self.runner.add(text, playlist=whole, voice=voice)
+                self.runner.add(text, playlist=whole, voice=voice, video=video)
                 self.refresh_jobs()
 
             self.push_screen(
@@ -636,7 +674,7 @@ class DownloaderApp(App):
                 answered,
             )
             return
-        self.runner.add(text, voice=voice)
+        self.runner.add(text, voice=voice, video=video)
         self.refresh_jobs()
 
     # -- the chips --------------------------------------------------------------
@@ -676,9 +714,15 @@ class DownloaderApp(App):
         stems.display = self.runner.uvr is not None
         preset = separation.PRESETS.get(settings.separation_preset)
         stems.show("Stems", preset.short if settings.separate and preset else "Off", settings.separate)
-        self.query_one("#chip-playlists", Chip).show(
-            "Playlists", PLAYLIST_LABELS.get(settings.playlist_mode, "Ask"), True
+        for chip in ("#chip-playlists", "#chip-video-playlists"):
+            self.query_one(chip, Chip).show("Playlists", PLAYLIST_LABELS.get(settings.playlist_mode, "Ask"), True)
+        self.query_one("#chip-video-mp3", Chip).show(
+            "MP3 too", "On" if settings.video_mp3 else "Off", settings.video_mp3
         )
+        self.query_one("#chip-video-quality", Chip).show(
+            "Quality", VIDEO_QUALITY_LABELS.get(settings.video_quality, settings.video_quality), True
+        )
+        self.query_one("#video-folder", Static).update(f"→ {describe_path(settings.videos)}")
         self.query_one("#folder", Static).update(f"→ {describe_path(settings.downloads)}")
 
         self.query_one("#chip-lead", Chip).show(
@@ -710,6 +754,20 @@ class DownloaderApp(App):
             # First, so a long path cannot push it out of sight.
             text = f"{count} song{'' if count == 1 else 's'}, {voice.format_minutes(seconds)}  {text}"
         self.voice_folder_view.update(text)
+
+    # The Videos tab's chips.
+
+    def action_toggle_video_mp3(self):
+        self.settings.video_mp3 = not self.settings.video_mp3
+        self.show_chips()
+
+    def action_cycle_video_quality(self):
+        # The everyday choices; 1440p and 4K are in Settings.
+        cycle = ["1080", "720", "480", "best"]
+        current = self.settings.video_quality
+        index = cycle.index(current) if current in cycle else -1
+        self.settings.video_quality = cycle[(index + 1) % len(cycle)]
+        self.show_chips()
 
     # The Voice tab's chips.
 
@@ -768,8 +826,8 @@ class DownloaderApp(App):
         for job in jobs:
             card = self.cards.get(job.id)
             if card is None:
-                # Voice dataset jobs are listed on their own tab.
-                container = self.voice_jobs_view if job.voice else self.jobs_view
+                # Voice and video jobs are listed on their own tabs.
+                container = self.voice_jobs_view if job.voice else self.video_jobs_view if job.video else self.jobs_view
                 card = self.cards[job.id] = JobCard(job)
                 container.mount(card, before=0)
                 container.scroll_home(animate=False)
@@ -782,7 +840,8 @@ class DownloaderApp(App):
                 if job.voice:
                     self.show_chips()  # a new artist folder, or more minutes
 
-        self.empty_view.display = not any(not job.voice for job in jobs)
+        self.empty_view.display = not any(not job.voice and not job.video for job in jobs)
+        self.video_empty_view.display = not any(job.video for job in jobs)
         self.voice_empty_view.display = not any(job.voice for job in jobs)
         if any(job.voice and job.state == RUNNING for job in jobs):
             self.show_voice_folder()
@@ -915,22 +974,31 @@ class DownloaderApp(App):
     def on_voice_tab(self):
         return self.tabs.active == "tab-voice"
 
+    @property
+    def on_video_tab(self):
+        return self.tabs.active == "tab-videos"
+
     def action_open_folder(self):
         folder = self.settings.downloads
         if self.on_voice_tab:
             folder = self.voice_folder() or self.settings.voices
+        elif self.on_video_tab:
+            folder = self.settings.videos
         folder.mkdir(parents=True, exist_ok=True)
         reveal(folder)
 
     def action_switch_tab(self):
-        self.tabs.active = "tab-downloads" if self.on_voice_tab else "tab-voice"
+        current = TABS.index(self.tabs.active) if self.tabs.active in TABS else 0
+        self.tabs.active = TABS[(current + 1) % len(TABS)]
 
     @on(TabbedContent.TabActivated, "#tabs")
     def tab_switched(self):
         self.action_focus_input()
 
     def action_focus_input(self):
-        if not self.on_voice_tab:
+        if self.on_video_tab:
+            self.query_one("#video-url").focus()
+        elif not self.on_voice_tab:
             self.query_one("#url").focus()
         elif self.artist_input.value.strip():
             self.query_one("#voice-url").focus()
@@ -944,7 +1012,7 @@ class DownloaderApp(App):
         self._move_card_focus(-1)
 
     def _move_card_focus(self, step):
-        view = self.voice_jobs_view if self.on_voice_tab else self.jobs_view
+        view = self.voice_jobs_view if self.on_voice_tab else self.video_jobs_view if self.on_video_tab else self.jobs_view
         cards = list(view.query(JobCard))
         if not cards:
             return
@@ -980,8 +1048,8 @@ class DownloaderApp(App):
         )
 
 
-def run(settings, updater, urls=(), first_run=False, voice=None):
-    app = DownloaderApp(settings, updater, urls, first_run, voice)
+def run(settings, updater, urls=(), first_run=False, voice=None, video=False):
+    app = DownloaderApp(settings, updater, urls, first_run, voice, video)
     try:
         app.run()
     finally:

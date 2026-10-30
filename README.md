@@ -44,6 +44,11 @@ Runs on **Windows** and **Linux** (made on Arch, works on any distribution).
   more. They are saved per user, so an update never resets them.
 - **MP3, M4A, Opus, Ogg, FLAC or WAV**, whichever you prefer.
 - **Playlists and albums**, downloaded as tagged files with cover art.
+- **The BPM of every song**, found after downloading, saved in the file's
+  tags (where DJ software, Mp3tag and most players look for it) and shown on
+  each download.
+- **Videos too.** A Videos tab saves .mp4 videos, with their sound as an .mp3
+  next to them if you like.
 - **Nothing gets clobbered.** A file that would overwrite an existing download
   is saved as `Song (1).mp3` instead.
 - **Downloads survive import failures.** If Audacity cannot be reached, the
@@ -279,6 +284,41 @@ bitrate, with the song's tags (titled like `Song (Vocals)`) and cover art. The
 just for this session. Separations run one at a time; downloads carry on in
 parallel.
 
+## Videos
+
+The **Videos** tab (`Ctrl+T` switches tabs) saves videos as .mp4 instead of
+just their sound. Paste a link (or several, or a playlist) or type something
+to search for. With **MP3 too** on, each video's sound is also saved as an
+.mp3 next to it, at your Downloads bitrate and with the same tags and cover
+art. They go to `Downloads/Videos`.
+
+**Quality** picks the tallest video to download. Up to 1080p (the default),
+the app prefers H.264 video with AAC sound, which plays everywhere: Windows'
+own apps, phones and video editors. YouTube only offers 1440p and 4K as VP9
+or AV1, so **Best** gets those; the .mp4 still holds them, but some older
+players and editors cannot. The chip cycles through 1080p, 720p, 480p and
+Best; 1440p and 4K are in Settings.
+
+Apple Music has no videos, and Spotify and the like encrypt theirs.
+
+## BPM
+
+Every song downloaded, on the Downloads and Videos tabs, gets its tempo
+worked out and saved in its tags: `TBPM` in MP3s, `tmpo` in M4A and MP4, and
+`BPM` in FLAC, Ogg and Opus (WAV has nowhere to keep it). The download's card
+shows it next to its status, as a range for a playlist, and the activity log
+(`Ctrl+L`) lists each song's. Separated stems carry the tag too. Files given
+from this PC are measured but not changed.
+
+It takes about a second a song. The method is the classic one librosa uses
+(an onset envelope, autocorrelated, preferring tempos near 120), with finer
+timing so it can tell 128 from 129 BPM. On the 1,000 GTZAN clips with
+GTZAN-Rhythm's hand-annotated tempos it was within 4% of the true tempo 70% of
+the time, and 89% counting half or double the tempo, against 66% and 84% for
+librosa itself. Half or double is the usual slip, as with every tempo
+detector: a 174 BPM drum and bass track may read 87. Turn it off under
+Settings > Downloads > BPM.
+
 ## Voice datasets for RVC
 
 The **Voice datasets** tab (`Ctrl+T` switches tabs) builds training data for
@@ -373,9 +413,9 @@ into lead and backing.
 | `Delete` | Remove a finished download from the list. |
 | `Ctrl+S` | Settings. |
 | `Ctrl+L` | Show or hide the activity log. |
-| `Ctrl+O` | Open the downloads folder (on the Voice tab, the artist's folder). |
+| `Ctrl+O` | Open the downloads folder (the videos folder on the Videos tab, the artist's folder on the Voice tab). |
 | `Ctrl+R` | Clear finished downloads from the list. |
-| `Ctrl+T` | Switch between the Downloads and Voice datasets tabs. |
+| `Ctrl+T` | Switch between the Downloads, Videos and Voice datasets tabs. |
 | `Ctrl+Q` | Quit. |
 
 The line at the bottom always shows the keys that apply right now.
@@ -389,7 +429,8 @@ own, and updating the app never resets them.
 
 | Section | Settings |
 | --- | --- |
-| Downloads | Download folder, audio format (MP3, M4A, Opus, Ogg, FLAC, WAV), bitrate, playlist behaviour, cover art. |
+| Downloads | Download folder, audio format (MP3, M4A, Opus, Ogg, FLAC, WAV), bitrate, playlist behaviour, cover art, BPM detection. |
+| Videos | Videos folder, quality (480p to 4K), and whether to save an MP3 too. |
 | Audacity | Import automatically, start Audacity automatically, turn on its scripting module. |
 | Stem separation | Set up or remove the engine, download every model in one go, separate automatically, preset, quality, stems folder, import the original and/or the stems, GPU or CPU, UVR5's folder. Stems use the Downloads format and bitrate. |
 | Voice datasets | Where artist folders go, and whether to remove backing vocals, reverb and echo, and long pauses. |
@@ -445,6 +486,11 @@ These override your saved settings for one run; they never change them.
 | `--stems-dir DIR` | Where to save separated stems. |
 | `--voice ARTIST` | Keep only the artist's dry vocals, in their voice dataset folder (see [Voice datasets](#voice-datasets-for-rvc)). |
 | `--voice-dir DIR` | Where to save voice datasets. |
+| `--video` | Save as .mp4 video (and its sound as an .mp3). |
+| `--video-quality Q` | `best`, `2160`, `1440`, `1080`, `720` or `480`. |
+| `--no-mp3` | With `--video`, save only the .mp4. |
+| `--video-dir DIR` | Where to save videos. |
+| `--no-bpm` | Do not detect and tag each song's BPM. |
 | `--cookies FILE` | Apple Music cookies file (default: `cookies.txt` next to the script). |
 | `--site-cookies FILE` | Cookies for yt-dlp, e.g. for age-restricted YouTube videos. `--youtube-cookies` still works too. |
 | `--no-launch` | Never start Audacity automatically. |
@@ -515,7 +561,8 @@ repository, and it should stay that way.
 | `settings.py` | Loading and saving the user's settings. |
 | `jobs.py` | The download queue, separation and importing. |
 | `sources.py` | Works out which site a link is from and what downloads it. |
-| `ytdlpdownloader.py` | yt-dlp wrapper: YouTube, SoundCloud and everything else. |
+| `ytdlpdownloader.py` | yt-dlp wrapper: YouTube, SoundCloud and everything else, as audio or video. |
+| `tempo.py` | Finds a song's BPM and saves it in its tags. |
 | `applemusicdownloader.py` | gamdl wrapper plus format conversion. |
 | `separation.py` | Finds UVR5, installs the separation engine, runs separations. |
 | `separator_worker.py` | Runs one separation inside `.venv-separator`. |

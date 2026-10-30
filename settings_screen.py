@@ -22,6 +22,7 @@ from settings import (
     DEVICES,
     PLAYLIST_MODES,
     SEPARATION_QUALITIES,
+    VIDEO_QUALITIES,
     VOICE_REVERB,
     Settings,
     settings_path,
@@ -243,6 +244,15 @@ class SettingsScreen(Screen):
                 yield hint(id="bitrate-hint")
                 yield row("Playlists", self._select("playlist_mode", PLAYLIST_MODES))
                 yield row("Cover art", Toggle("Embed the thumbnail or album art", s.embed_thumbnail, id="f-embed_thumbnail"))
+                yield row("BPM", Toggle("Find each song's tempo and save it in its tags", s.detect_bpm, id="f-detect_bpm"))
+                yield hint("Shown on each download too. Also used by the Videos tab.")
+
+            with Vertical(classes="section") as section:
+                section.border_title = "Videos"
+                yield row("Save videos to", *path_input("video_dir", s.video_dir, str(s.videos)))
+                yield row("Quality", self._select("video_quality", VIDEO_QUALITIES))
+                yield row("MP3", Toggle("Also save each video's sound as an MP3", s.video_mp3, id="f-video_mp3"))
+                yield hint("Videos are saved as .mp4. The MP3 uses the Downloads bitrate.")
 
             with Vertical(classes="section") as section:
                 section.border_title = "Audacity"
@@ -400,6 +410,7 @@ class SettingsScreen(Screen):
         downloads = Path(self.value("download_dir") or default_downloads_dir())
         self.query_one("#f-separation_dir", Input).placeholder = str(downloads / "Separated")
         self.query_one("#f-voice_dir", Input).placeholder = str(downloads / "Voice Datasets")
+        self.query_one("#f-video_dir", Input).placeholder = str(downloads / "Videos")
 
         steps = voice.preset(self.value("voice_lead_only"), self.value("voice_reverb")).steps_for(quality)
         models = [step.model for step in steps]
@@ -492,7 +503,7 @@ class SettingsScreen(Screen):
         field = self.query_one(f"#f-{name}", Input)
         initial = field.value or field.placeholder
         title = {"download_dir": "Save downloads to", "separation_dir": "Save separated stems to",
-                 "voice_dir": "Save voice datasets to",
+                 "voice_dir": "Save voice datasets to", "video_dir": "Save videos to",
                  "uvr_path": "Ultimate Vocal Remover's folder"}.get(name, "Choose a file")
 
         def pick():
