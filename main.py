@@ -257,8 +257,11 @@ def main(argv=None):
     options = parse_arguments(argv)
     settings, first_run = load_settings()
     if first_run:
-        # Start new users off with what their PC can actually do.
-        settings.import_to_audacity = audacity.find_audacity() is not None
+        # Start new users off with what their PC can actually do. A running
+        # Audacity counts: its pipes are enough to import into.
+        settings.import_to_audacity = (
+            audacity.find_audacity() is not None or audacity.is_running()
+        )
     settings = apply_arguments(settings, options)
 
     # Start checking for updates straight away; it runs in the background.

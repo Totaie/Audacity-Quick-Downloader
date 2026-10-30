@@ -39,11 +39,17 @@ def main():
         print(f"  script pipes in /tmp: {fifos or 'none'}")
     print()
 
-    if executable is None:
+    if executable is None and not audacity.is_running():
         print("STOP: Audacity is not installed where the app looks.")
         print("  Install the distribution's Audacity (Arch: sudo pacman -S audacity),")
         print("  or set AUDACITY_PATH to the full path of the Audacity executable.")
         return 1
+    if executable is None:
+        print("Audacity is running, but its executable is not where the app looks.")
+        print("  Its scripting pipes are enough to import into; to also let the app")
+        print("  start it, set AUDACITY_PATH to the full path of the executable.")
+        print("  Find it with: pid=$(pgrep -x audacity) && ls -l /proc/$pid/exe")
+        print()
 
     running = audacity.is_running()
     print(f"Running: {running}")

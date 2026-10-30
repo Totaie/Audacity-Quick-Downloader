@@ -276,7 +276,13 @@ class Runner:
             return self._run_video(job)
 
         # Without Audacity this is just a downloader; say so once, not after a wait.
-        if job.import_into_audacity and audacity.find_audacity() is None:
+        # A running Audacity counts: its scripting pipes are enough to import
+        # into, even when the executable is not where the app looks for it.
+        if (
+            job.import_into_audacity
+            and audacity.find_audacity() is None
+            and not audacity.is_running()
+        ):
             self._warn(job, "Not imported: Audacity is not installed (see the README to set it up).")
             settings.import_to_audacity = False
 

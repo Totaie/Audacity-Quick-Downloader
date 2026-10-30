@@ -868,7 +868,9 @@ class DownloaderApp(App):
     def show_status(self):
         """The dots in the top right: is Audacity up, is UVR5 ready."""
         text = Text()
-        if audacity.find_audacity() is not None:
+        # A running Audacity is enough to import into, even when its
+        # executable is not where the app looks for it.
+        if audacity.find_audacity() is not None or self.audacity_running:
             if self.audacity_running:
                 text.append("● ", style="green")
                 text.append("Audacity")
