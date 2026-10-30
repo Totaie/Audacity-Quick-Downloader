@@ -71,6 +71,7 @@ def find_audacity():
         # reachable from outside and they are deliberately not looked for.
         candidates.append(Path("/usr/bin/audacity"))
         candidates.append(Path("/usr/local/bin/audacity"))
+        candidates.append(Path.home() / ".local" / "bin" / "audacity")
 
     for candidate in candidates:
         if candidate.exists():
@@ -107,15 +108,59 @@ def is_running():
             == 0
         )
     except (OSError, subprocess.SubprocessError):
+        # No pgrep: read /proc directly, so a missing procps cannot make the
+        # app think Audacity is down and start a second copy.
+        try:
+            for entry in os.listdir("/proc"):
+                if not entry.isdigit():
+                    continue
+                try:
+                    with open(f"/proc/{entry}/comm") as comm:
+                        if comm.read().strip() == "audacity":
+                            return True
+                except OSError:
+                    continue
+        except OSError:
+            pass
         # If we cannot tell, assume it is not running: the worst case is that
         # Audacity gets asked to start when it already is, which is harmless.
         return False
+
+
+def sandboxed_audacity():
+    """'Flatpak' or 'Snap' when one of those Audacity builds is installed, else None.
+
+    Those builds run in a sandbox: their scripting pipes are not reachable
+    from outside, so this app cannot import into them. Naming the build in an
+    error message is the difference between 'Audacity is not installed' (wrong)
+    and 'install the distribution's Audacity' (actionable).
+    """
+    if sys.platform in ("win32", "darwin"):
+        return None
+    home = Path.home()
+    for marker in (
+        home / ".local" / "share" / "flatpak" / "app" / "org.audacity.Audacity",
+        home / "snap" / "audacity" / "current",
+        Path("/snap/audacity/current"),
+    ):
+        if marker.exists():
+            return "Flatpak" if "flatpak" in str(marker) else "Snap"
+    return None
 
 
 def launch(executable=None):
     """Start Audacity detached from this console and return the executable used."""
     executable = Path(executable) if executable else find_audacity()
     if executable is None:
+        sandboxed = sandboxed_audacity()
+        if sandboxed:
+            raise AudacityError(
+                f"Could not find Audacity. A {sandboxed} Audacity is installed, but "
+                "sandboxed builds cannot be scripted: install the distribution's "
+                "Audacity (on Arch: sudo pacman -S audacity) or set the "
+                "AUDACITY_PATH environment variable to the full path of the "
+                "Audacity executable."
+            )
         raise AudacityError(
             "Could not find Audacity. Install it from https://audacityteam.org, "
             "or set the AUDACITY_PATH environment variable to the full path of "
@@ -266,6 +311,14 @@ def ensure_running(auto_launch=True, ask=None, log=print):
 
 def connection_hint():
     """A message explaining why the pipes are missing, as best we can tell."""
+    sandboxed = sandboxed_audacity()
+    if sandboxed:
+        return (
+            f"A {sandboxed} Audacity is installed, but sandboxed builds keep their "
+            "scripting pipes inside the sandbox, where this app cannot reach them. "
+            "Install the distribution's Audacity (on Arch: sudo pacman -S audacity) "
+            "or set AUDACITY_PATH. " + ENABLE_INSTRUCTIONS
+        )
     enabled = script_pipe_enabled()
     if enabled is False:
         return (

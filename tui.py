@@ -608,6 +608,14 @@ class DownloaderApp(App):
         self.set_interval(REFRESH_INTERVAL, self.refresh_jobs)
         self.set_interval(AUDACITY_POLL_INTERVAL, self.poll_audacity)
         self.poll_audacity()
+        if not self.settings.import_to_audacity and audacity.find_audacity() is not None:
+            # A first run before Audacity was installed saves import off; say so
+            # once, so it cannot fail silently forever after.
+            self.runner.log(
+                "Audacity was found, but importing into it is turned off. "
+                "Turn it on in Settings (Ctrl+S).",
+                "warning",
+            )
         if self.initial_voice:
             self.artist_input.value = self.initial_voice
             self.tabs.active = "tab-voice"
@@ -866,6 +874,9 @@ class DownloaderApp(App):
                 text.append("Audacity")
             else:
                 text.append("○ Audacity", style="dim")
+        else:
+            # Nothing here is a silent failure: say where Audacity is missing.
+            text.append("Audacity not found", style="yellow")
         if self.runner.uvr is not None:
             installer, downloader = self.engine_installer, self.model_downloader
             if text:

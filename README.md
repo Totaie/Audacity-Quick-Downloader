@@ -150,10 +150,13 @@ where downloads (and separated stems) are saved before you start.
    and install it with the default options. The app finds it in
    `Program Files` automatically.
 
-   **Arch Linux:** `sudo pacman -S audacity`. The app finds `/usr/bin/audacity`.
+   **Arch Linux:** `sudo pacman -S audacity`. The app finds `/usr/bin/audacity`
+   (and `~/.local/bin/audacity` if you keep it there).
 
    If you put it somewhere else, set the `AUDACITY_PATH` environment variable
-   to the full path of the Audacity program.
+   to the full path of the Audacity program. If a Flatpak or Snap Audacity is
+   installed, the app names it in the error, since those sandboxed builds
+   cannot be scripted.
 2. Open Audacity, go to `Edit > Preferences > Modules`, set **mod-script-pipe**
    to `Enabled`, and restart Audacity. Without this, Audacity has no way to
    accept the import command.
@@ -161,8 +164,9 @@ where downloads (and separated stems) are saved before you start.
    Or let the app do it: Settings shows a **Turn it on** button when the module
    is off (close Audacity first), and it also offers when it starts Audacity for
    you.
-3. That's it. The dot in the top right of the app shows whether Audacity is
-   running, and each download says when its tracks are in Audacity.
+3. That's it. The top right of the app shows whether Audacity is running
+   (a green dot), says **Audacity not found** when it cannot be located, and
+   each download says when its tracks are in Audacity.
 
 ## Stem separation with UVR5
 
