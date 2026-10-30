@@ -58,6 +58,9 @@ class Job:
     files: list = field(default_factory=list)
     stems: list = field(default_factory=list)  # every stem file made
     imported: int = 0
+    # The Audacity window its first track went into: the rest follow it there,
+    # even if the user has moved to another window since.
+    audacity_window: int = None
     bpms: dict = field(default_factory=dict)  # {file: tempo} for each song with a steady beat
     message: str = None  # the result, or why it failed
     warnings: list = field(default_factory=list)  # went wrong, but not fatally
@@ -650,7 +653,7 @@ class Runner:
             with audacity.connect(timeout, on_wait=lambda: stage("Waiting for Audacity to start")) as session:
                 stage("Importing into Audacity")
                 for number, path in enumerate(files, 1):
-                    session.import_file(Path(path))
+                    job.audacity_window = session.import_file(Path(path), window=job.audacity_window)
                     job.imported += 1
                     if not quietly:
                         job.fraction = number / len(files)
