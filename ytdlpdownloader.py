@@ -1,4 +1,4 @@
-"""Download audio with yt-dlp: YouTube, SoundCloud, Bandcamp and more.
+"""Download audio or video with yt-dlp: YouTube, SoundCloud, Bandcamp and more.
 
 yt-dlp is kept quiet; its progress comes back through a :class:`Reporter`
 instead of being printed.
@@ -8,7 +8,7 @@ import re
 import shutil
 from pathlib import Path
 
-from formats import AUDIO_FORMATS
+from formats import AUDIO_FORMATS, convert_audio
 from utils import (
     Cancelled,
     DownloadError,
@@ -27,7 +27,12 @@ POSTPROCESSOR_STAGES = {
     "ExtractAudio": "Converting",
     "Metadata": "Tagging",
     "EmbedThumbnail": "Adding cover art",
+    "Merger": "Joining video and audio",
+    "VideoRemuxer": "Saving as MP4",
 }
+
+# The Videos tab's quality choices: the tallest video to download, in pixels.
+VIDEO_HEIGHTS = {"best": None, "2160": 2160, "1440": 1440, "1080": 1080, "720": 720, "480": 480}
 
 
 def _import_yt_dlp():
@@ -73,7 +78,16 @@ def tidy_error(message):
     """
     message = re.sub(r"^\[[\w:-]+\] [^:]+: ", "", message.strip())
     message = re.sub(r"\s*\(caused by .*\)$", "", message, flags=re.S)
-    return message.split("\n")[0].strip()
+    message = message.split("\n")[0].strip()
+    # yt-dlp's advice names its own command line flags, which mean nothing
+    # here. Point at our setting instead.
+    if "--cookies-from-browser or --cookies" in message:
+        message = message.split(". Use --cookies-from-browser")[0].rstrip(".") + (
+            ". Sign in to the site in your browser, export its cookies to a "
+            "cookies.txt file, and choose it under Settings > Cookies > "
+            "Other sites' cookies (or pass --site-cookies)."
+        )
+    return message
 
 
 def find_deno():
@@ -112,10 +126,40 @@ def build_options(
         # Likewise, cover art needs both the post-processor and writethumbnail.
         postprocessors.append({"key": "EmbedThumbnail", "already_have_thumbnail": False})
 
+    options = _common_options(destination, playlist, cookies)
+    options.update(format="bestaudio/best", postprocessors=postprocessors, writethumbnail=thumbnail)
+    return options
+
+
+def build_video_options(destination, height=None, playlist=False, cookies=None, thumbnail=True):
+    """yt-dlp options that produce tagged .mp4 videos inside ``destination``.
+
+    Formats are ranked by resolution (up to ``height``), then H.264 video and
+    AAC audio, which play everywhere: Windows' own apps, phones and video
+    editors. Above 1080p YouTube only has VP9 and AV1, which the .mp4 still
+    holds, but some older players cannot.
+    """
+    postprocessors = [
+        {"key": "FFmpegVideoRemuxer", "preferedformat": "mp4"},
+        {"key": "FFmpegMetadata", "add_metadata": True},
+    ]
+    if thumbnail:
+        # As a .jpg, kept after embedding: the MP3 made from the video uses it too.
+        postprocessors.insert(0, {"key": "FFmpegThumbnailsConvertor", "format": "jpg", "when": "before_dl"})
+        postprocessors.append({"key": "EmbedThumbnail", "already_have_thumbnail": True})
+    options = _common_options(destination, playlist, cookies)
+    options.update(
+        format="bv*+ba/b",
+        format_sort=[f"res:{height}" if height else "res", "vcodec:h264", "acodec:aac"],
+        merge_output_format="mp4",
+        postprocessors=postprocessors,
+        writethumbnail=thumbnail,
+    )
+    return options
+
+
+def _common_options(destination, playlist, cookies):
     options = {
-        "format": "bestaudio/best",
-        "postprocessors": postprocessors,
-        "writethumbnail": thumbnail,
         "outtmpl": str(Path(destination) / "%(title)s.%(ext)s"),
         "noplaylist": not playlist,
         "ffmpeg_location": find_ffmpeg(),
@@ -183,12 +227,16 @@ def download_audio(
     thumbnail=True,
     reporter=None,
     audio_format="mp3",
+    skip=None,
 ):
     """Download ``url`` and return the audio files saved in ``output_dir``.
 
     Everything is downloaded into a scratch folder first so we know exactly
     which files this run produced, then moved into the output folder without
     overwriting anything that is already there.
+
+    ``skip(title)`` can return True to leave a track out without downloading
+    it, e.g. one that is already done.
     """
     yt_dlp = _import_yt_dlp()
     reporter = reporter or Reporter()
@@ -203,23 +251,15 @@ def download_audio(
             thumbnail=thumbnail,
             audio_format=audio_format,
         )
-        logger = _Logger(reporter)
-        on_progress, on_postprocess = _hooks(reporter, yt_dlp)
-        options.update(
-            logger=logger,
-            progress_hooks=[on_progress],
-            postprocessor_hooks=[on_postprocess],
-        )
+        if skip:
+            # yt-dlp skips an entry when this returns a reason. It can ask
+            # more than once about the same entry.
+            def match_filter(info, *, incomplete=False):
+                title = info.get("title")
+                return "already done" if title and skip(title) else None
 
-        reporter.stage("Looking it up")
-        try:
-            with yt_dlp.YoutubeDL(options) as downloader:
-                downloader.download([url])
-        except yt_dlp.utils.DownloadCancelled:
-            raise Cancelled("Cancelled.")
-        except yt_dlp.utils.DownloadError as error:
-            raise DownloadError(logger.errors[-1] if logger.errors else tidy_error(strip_ansi(str(error))))
-        reporter.check_cancelled()
+            options["match_filter"] = match_filter
+        logger = _run(yt_dlp, options, url, reporter)
 
         tracks = collect_files(workspace, {AUDIO_FORMATS[audio_format]["extension"]})
         if not tracks:
@@ -231,3 +271,77 @@ def download_audio(
             )
 
         return [move_into(track, output_dir) for track in tracks]
+
+
+def download_video(
+    url,
+    output_dir=None,
+    playlist=False,
+    quality="1080",
+    cookies=None,
+    thumbnail=True,
+    reporter=None,
+    mp3=True,
+    bitrate="192",
+):
+    """Download ``url`` as .mp4 video. Returns [(video, mp3 or None), ...].
+
+    With ``mp3``, each video's sound is also saved as an MP3 next to it,
+    carrying the same tags and cover art.
+    """
+    yt_dlp = _import_yt_dlp()
+    reporter = reporter or Reporter()
+    output_dir = Path(output_dir) if output_dir else default_downloads_dir() / "Videos"
+
+    with temp_workspace(output_dir) as workspace:
+        options = build_video_options(
+            workspace, height=VIDEO_HEIGHTS.get(quality), playlist=playlist, cookies=cookies, thumbnail=thumbnail
+        )
+        logger = _run(yt_dlp, options, url, reporter)
+
+        videos = collect_files(workspace, {".mp4"})
+        if not videos:
+            if logger.errors:
+                raise DownloadError(logger.errors[-1])
+            raise DownloadError(
+                "Nothing was downloaded. The link may not contain a video, "
+                "or it may be private, removed or region locked."
+            )
+
+        saved = []
+        for number, video in enumerate(videos, 1):
+            audio = None
+            if mp3:
+                reporter.check_cancelled()
+                if len(videos) > 1:
+                    reporter.item(number, len(videos), video.stem)
+                reporter.stage("Saving the MP3")
+                reporter.progress(None)
+                cover = video.with_suffix(".jpg")
+                audio = convert_audio(
+                    video,
+                    "mp3",
+                    bitrate,
+                    destination=video.with_suffix(".mp3"),
+                    cover_art=thumbnail and cover.exists(),
+                    cover_image=cover if cover.exists() else None,
+                )
+            saved.append((move_into(video, output_dir), move_into(audio, output_dir) if audio else None))
+        return saved
+
+
+def _run(yt_dlp, options, url, reporter):
+    """Run yt-dlp with progress going to ``reporter``. Returns its logger."""
+    logger = _Logger(reporter)
+    on_progress, on_postprocess = _hooks(reporter, yt_dlp)
+    options.update(logger=logger, progress_hooks=[on_progress], postprocessor_hooks=[on_postprocess])
+    reporter.stage("Looking it up")
+    try:
+        with yt_dlp.YoutubeDL(options) as downloader:
+            downloader.download([url])
+    except yt_dlp.utils.DownloadCancelled:
+        raise Cancelled("Cancelled.")
+    except yt_dlp.utils.DownloadError as error:
+        raise DownloadError(logger.errors[-1] if logger.errors else tidy_error(strip_ansi(str(error))))
+    reporter.check_cancelled()
+    return logger

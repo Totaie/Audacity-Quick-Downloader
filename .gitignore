@@ -1,5 +1,5 @@
-# Apple Music session cookies - never commit these
-cookies.txt
+# Session cookies (Apple Music, Reddit, any site) - never commit these
+cookies*.txt
 
 # Downloaded music and scratch folders
 Downloads/

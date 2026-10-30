@@ -281,6 +281,82 @@ def connection_hint():
 
 
 # --------------------------------------------------------------------------
+# Project windows (Windows only)
+# --------------------------------------------------------------------------
+#
+# Scripting commands always act on Audacity's "active" project: the window
+# that was activated last. So a playlist, or stems that arrive minutes after
+# their song, would land in whichever window the user happens to be in. To
+# keep a download's tracks together, its first import notes the window it
+# went into, and later imports send that window an activate message first
+# (without bringing it to the front, which Windows would not allow anyway),
+# then hand "active" back to the window the user is in.
+
+if sys.platform == "win32":
+    import ctypes
+    from ctypes import wintypes
+
+    _user32 = ctypes.WinDLL("user32", use_last_error=True)
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _ENUM_WINDOWS = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    WM_ACTIVATE, WA_ACTIVE, GW_OWNER = 0x0006, 1, 4
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+
+def _process_name(pid):
+    handle = _kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return ""
+    try:
+        size = wintypes.DWORD(1024)
+        buffer = ctypes.create_unicode_buffer(1024)
+        if _kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+            return buffer.value.rsplit("\\", 1)[-1].lower()
+        return ""
+    finally:
+        _kernel32.CloseHandle(handle)
+
+
+def project_windows():
+    """Audacity's project windows, frontmost first. [] off Windows.
+
+    A project window is a visible, unowned top-level window with a menu bar;
+    Audacity's dialogs and floating toolbars have no menu bar.
+    """
+    if sys.platform != "win32":
+        return []
+    found = []
+
+    def visit(hwnd, _):
+        if _user32.IsWindowVisible(hwnd) and not _user32.GetWindow(hwnd, GW_OWNER) and _user32.GetMenu(hwnd):
+            pid = wintypes.DWORD()
+            _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if _process_name(pid.value) == "audacity.exe":
+                found.append(hwnd)
+        return True
+
+    _user32.EnumWindows(_ENUM_WINDOWS(visit), 0)
+    return found
+
+
+def active_window():
+    """The project window Audacity imports into right now, or None.
+
+    That is the one the user is in, if they are in Audacity, and otherwise
+    the one they were in last, which Windows keeps in front of the others.
+    """
+    windows = project_windows()
+    if not windows:
+        return None
+    foreground = _user32.GetForegroundWindow()
+    return foreground if foreground in windows else windows[0]
+
+
+def _activate(window):
+    _user32.SendMessageW(window, WM_ACTIVATE, WA_ACTIVE, 0)
+
+
+# --------------------------------------------------------------------------
 # The scripting connection itself
 # --------------------------------------------------------------------------
 
@@ -407,16 +483,33 @@ class Audacity:
             )
         return response
 
-    def import_file(self, path):
-        """Import an audio file as a new track."""
+    def import_file(self, path, window=None):
+        """Import an audio file as a new track. Returns the window it went into.
+
+        ``window`` (from an earlier import) puts it in that project window,
+        whichever one the user is in now. Without it, or once that window is
+        closed, the track goes into the active window, which is returned so
+        the next import can follow it there. None off Windows.
+        """
         path = Path(path).resolve()
         if not path.exists():
             raise AudacityError(f"{path} no longer exists.")
 
-        response = self.command(f'Import2: Filename="{path}"')
+        current = active_window()
+        if window not in project_windows():  # never set, or closed since
+            window = current
+        if window is not None:
+            # Always, even when it looks active already: Audacity's own idea
+            # of the active window can differ from the window order we see.
+            _activate(window)
+        try:
+            response = self.command(f'Import2: Filename="{path}"')
+        finally:
+            if window is not None and current is not None and window != current:
+                _activate(current)  # back to the window the user is in
         if "failed" in response.lower():
             raise AudacityError(f"Audacity could not import {path.name}: {response.strip()}")
-        return response
+        return window
 
 
 def connect(timeout=STARTUP_TIMEOUT, command_timeout=COMMAND_TIMEOUT, on_wait=None):

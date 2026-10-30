@@ -146,7 +146,18 @@ KARA_2 = "UVR_MDXNET_KARA_2.onnx"
 DEMUCS_4 = "htdemucs.yaml"
 DEMUCS_6 = "htdemucs_6s.yaml"
 
-MODEL_SIZES_MB = {LEAP: 228, SW: 667, KARAOKE: 195, INST_HQ_3: 64, KARA_2: 50, DEMUCS_4: 80, DEMUCS_6: 53}
+# Reverb (and echo) removal, for the voice dataset tab (voice.py). anvuew's
+# 2026 BS-Roformer won a test of dry singing given real rooms, studio reverb
+# and echo: +3.3 dB SDR over doing nothing, against +1.8 for his older
+# MelBand model and +2.4 for MDX23C (which made echo worse). It also leads
+# MVSEP's de-reverb comparison among public models. FoxJoy's is the fast one.
+DEREVERB = "dereverb_bs_roformer_anvuew_sdr_22.5050.ckpt"
+DEREVERB_FAST = "UVR-DeEcho-DeReverb.pth"
+
+MODEL_SIZES_MB = {
+    SW: 667, KARAOKE: 195, INST_HQ_3: 64, KARA_2: 50, DEMUCS_4: 80, DEMUCS_6: 53,
+    DEREVERB: 196, DEREVERB_FAST: 213, LEAP: 228,
+}
 
 # Models audio-separator does not list itself, fetched from Hugging Face on
 # first use with their authors' own configs (see separator_worker.py).
@@ -155,6 +166,10 @@ EXTRA_MODELS = {
     LEAP: {
         "model": f"{HF}/pcunwa/BS-Roformer-Leap/resolve/main/bs_roformer_leap_voc.ckpt",
         "config": f"{HF}/pcunwa/BS-Roformer-Leap/resolve/main/bs_leap_voc_conf.yaml",
+    },
+    DEREVERB: {
+        "model": f"{HF}/anvuew/dereverb_bs_roformer/resolve/main/dereverb_bs_roformer_anvuew_sdr_22.5050.ckpt",
+        "config": f"{HF}/anvuew/dereverb_bs_roformer/resolve/main/config.yaml",
     },
 }
 
@@ -612,11 +627,12 @@ def remove_engine():
 
 
 def all_models():
-    """Every model any preset uses, at any quality."""
+    """Every model any preset (or the voice dataset tab) uses, at any quality."""
     models = []
     for preset in PRESETS.values():
         for quality in ("best", "fast"):
             models += preset.models(quality)
+    models += [DEREVERB, DEREVERB_FAST]
     return list(dict.fromkeys(models))
 
 
@@ -770,6 +786,7 @@ def separate(
     ``bitrate``, carrying the song's tags and (with ``cover_art``) its artwork.
     ``on_stems({name: path})`` is called (on another thread) with each batch
     of stems as soon as they are saved, while later models are still running.
+    ``preset`` is the name of one of PRESETS, or a Preset of its own.
     Returns {stem name: path}, e.g. {"Vocals": ..., "Instrumental": ...}.
     """
     reporter = reporter or Reporter()
@@ -777,14 +794,16 @@ def separate(
         raise SeparationError(
             "The separation engine is not installed. Set it up from Settings (Ctrl+S)."
         )
-    if preset not in PRESETS:
-        raise SeparationError(f"Unknown separation preset {preset!r}.")
+    if not isinstance(preset, Preset):
+        if preset not in PRESETS:
+            raise SeparationError(f"Unknown separation preset {preset!r}.")
+        preset = PRESETS[preset]
 
     # "auto" means whatever the engine was installed for.
     if device == "auto":
         device = engine_info().get("device", "cpu")
     quality = resolve_quality(quality, device)
-    steps = PRESETS[preset].steps_for(quality)
+    steps = preset.steps_for(quality)
     if device == "gpu" and quality != "fast":
         free = free_vram_gb()
         if free is not None and free < LOW_FREE_VRAM_GB:

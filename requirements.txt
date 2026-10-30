@@ -7,3 +7,6 @@ gamdl>=3.8.4
 deno>=2.0
 # The full screen terminal interface.
 textual>=8.2
+# Finding each song's tempo (tempo.py) and saving it in the file's tags.
+numpy>=2.0
+mutagen>=1.47

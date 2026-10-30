@@ -46,12 +46,15 @@ def convert_audio(
     tags_from=None,
     title=None,
     cover_art=True,
+    cover_image=None,
 ):
     """Convert ``source`` to ``audio_format`` and return the new file.
 
     Tags (and cover art, where the format allows) are copied from
-    ``tags_from``, or from ``source`` itself. ``title`` replaces the title
-    tag. Without ``destination`` the file is written next to ``source``.
+    ``tags_from``, or from ``source`` itself. ``cover_image`` is a picture
+    file to use as the cover instead, which a video needs: its own picture
+    stream is the video itself. ``title`` replaces the title tag. Without
+    ``destination`` the file is written next to ``source``.
     """
     source = Path(source)
     tags_from = Path(tags_from) if tags_from else source
@@ -68,6 +71,10 @@ def convert_audio(
     if tags_from != source:
         inputs += ["-i", str(tags_from)]
         tags = 1
+    picture = f"{tags}:v?"
+    if cover_image:
+        inputs += ["-i", str(cover_image)]
+        picture = f"{tags + 1}:v"
     encode = [part.format(bitrate=bitrate) for part in ENCODERS[audio_format]]
     encode += ["-map_metadata", str(tags)]
     if title:
@@ -82,7 +89,7 @@ def convert_audio(
         attempts.insert(
             0,
             inputs
-            + ["-map", "0:a", "-map", f"{tags}:v?", "-codec:v", "copy", "-disposition:v", "attached_pic"]
+            + ["-map", "0:a", "-map", picture, "-codec:v", "copy", "-disposition:v", "attached_pic"]
             + encode,
         )
 

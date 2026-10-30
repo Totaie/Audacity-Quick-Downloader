@@ -15,7 +15,7 @@ from pathlib import Path
 import audacity
 from jobs import CANCELLED, DONE, FAILED, RUNNING, Runner
 from separation import PRESETS
-from settings import AUDIO_FORMATS, BITRATES, settings_path
+from settings import AUDIO_FORMATS, BITRATES, VIDEO_QUALITIES, settings_path
 from settings import load as load_settings
 from sources import identify, split_input
 from updater import Updater
@@ -66,6 +66,8 @@ class PlainPrinter:
             if job.finished_state:
                 symbol = self.SYMBOLS[job.state]
                 print(f"[{job.id}] {symbol} {job.label}: {job.message}")
+                if job.bpm_text:
+                    print(f"[{job.id}]   {job.bpm_text}")
                 if job.warning:
                     print(f"[{job.id}]   {job.warning}")
 
@@ -82,22 +84,22 @@ class PlainPrinter:
         self.show()
 
 
-def plain_add(runner, text):
+def plain_add(runner, text, voice=None, video=False):
     source = identify(text)
     playlist = runner.settings.playlist
     if source.ambiguous_playlist and playlist is None:
         playlist = ask_yes_no("That link is part of a playlist. Download the whole playlist?")
-    return runner.add(text, playlist)
+    return runner.add(text, playlist, voice, video)
 
 
-def run_plain(settings, updater, urls):
+def run_plain(settings, updater, urls, voice=None, video=False):
     runner = Runner(settings, updater, ask=lambda question, default=False: ask_yes_no(question, default))
     printer = PlainPrinter(runner)
     try:
         if urls:
             for url in urls:
                 for entry in split_input(url):
-                    plain_add(runner, entry)
+                    plain_add(runner, entry, voice, video)
             printer.wait()
             return 1 if any(job.state != DONE for job in runner.jobs) else 0
 
@@ -111,7 +113,7 @@ def run_plain(settings, updater, urls):
             if text.lower() in QUIT_WORDS:
                 return 0
             for entry in split_input(text):
-                plain_add(runner, entry)
+                plain_add(runner, entry, voice, video)
             printer.wait()
     except KeyboardInterrupt:
         print("\nCancelled.")
@@ -182,6 +184,19 @@ def parse_arguments(argv=None):
     )
     parser.add_argument("--preset", choices=PRESETS, help="which stems to split into")
     parser.add_argument("--stems-dir", type=Path, help="where to save separated stems")
+    parser.add_argument(
+        "--voice",
+        metavar="ARTIST",
+        help="keep only the artist's dry vocals, in a voice dataset folder named after them (for RVC)",
+    )
+    parser.add_argument("--voice-dir", type=Path, help="where to save voice datasets")
+    parser.add_argument(
+        "--video", action="store_true", help="save as .mp4 video (and its sound as an .mp3, see --no-mp3)"
+    )
+    parser.add_argument("--video-quality", choices=VIDEO_QUALITIES, help="the tallest video to download")
+    parser.add_argument("--no-mp3", action="store_true", help="with --video, do not also save an .mp3")
+    parser.add_argument("--video-dir", type=Path, help="where to save videos")
+    parser.add_argument("--no-bpm", action="store_true", help="do not detect and tag each song's BPM")
 
     parser.add_argument("--no-launch", action="store_true", help="never start Audacity automatically")
     parser.add_argument("--no-import", action="store_true", help="do not touch Audacity at all")
@@ -210,6 +225,9 @@ def apply_arguments(settings, options):
         "separate": options.separate,
         "separation_preset": options.preset,
         "separation_dir": options.stems_dir,
+        "voice_dir": options.voice_dir,
+        "video_dir": options.video_dir,
+        "video_quality": options.video_quality,
     }
     for name, value in overrides.items():
         if value is not None:
@@ -222,6 +240,10 @@ def apply_arguments(settings, options):
         settings.import_to_audacity = False
     if options.no_thumbnail:
         settings.embed_thumbnail = False
+    if options.no_mp3:
+        settings.video_mp3 = False
+    if options.no_bpm:
+        settings.detect_bpm = False
     return settings
 
 
@@ -252,11 +274,11 @@ def main(argv=None):
             print("Run: pip install -r requirements.txt")
             print("Falling back to plain output.\n")
         else:
-            return tui.run(settings, updater, options.urls, first_run=first_run)
+            return tui.run(settings, updater, options.urls, first_run=first_run, voice=options.voice, video=options.video)
 
     if first_run:
         settings.save()  # plain mode has no settings screen; start from defaults
-    return run_plain(settings, updater, options.urls)
+    return run_plain(settings, updater, options.urls, options.voice, options.video)
 
 
 if __name__ == "__main__":

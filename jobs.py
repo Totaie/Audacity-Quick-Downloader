@@ -11,6 +11,7 @@ changing a setting affects new downloads without upsetting running ones.
 import copy
 import itertools
 import queue
+import shutil
 import threading
 import time
 from dataclasses import dataclass, field
@@ -18,10 +19,12 @@ from pathlib import Path
 
 import audacity
 import separation
+import tempo
+import voice
 from applemusicdownloader import DEFAULT_COOKIES, download_apple_music
 from sources import identify, local_audio
-from utils import Cancelled, DownloadError, Reporter, describe_path
-from ytdlpdownloader import download_audio
+from utils import Cancelled, DownloadError, Reporter, describe_path, temp_workspace, unique_path
+from ytdlpdownloader import download_audio, download_video
 
 WORKERS = 3
 
@@ -39,6 +42,8 @@ class Job:
     text: str
     settings: object  # a copy of settings.Settings
     playlist: bool = False
+    voice: str = None  # the artist, for the Voice tab: keep only their vocals
+    video: bool = False  # from the Videos tab: save .mp4 (and .mp3)
 
     state: str = QUEUED
     stage: str = "Queued"
@@ -53,6 +58,10 @@ class Job:
     files: list = field(default_factory=list)
     stems: list = field(default_factory=list)  # every stem file made
     imported: int = 0
+    # The Audacity window its first track went into: the rest follow it there,
+    # even if the user has moved to another window since.
+    audacity_window: int = None
+    bpms: dict = field(default_factory=dict)  # {file: tempo} for each song with a steady beat
     message: str = None  # the result, or why it failed
     warnings: list = field(default_factory=list)  # went wrong, but not fatally
     started: float = None
@@ -71,9 +80,14 @@ class Job:
         return "\n".join(self.warnings) if self.warnings else None
 
     @property
+    def bpm_text(self):
+        """The tempo, or the range of tempos for a playlist, e.g. "128 BPM"."""
+        return tempo.describe(self.bpms.values())
+
+    @property
     def import_into_audacity(self):
         s = self.settings
-        return s.import_to_audacity and (s.import_original or (s.separate and s.import_stems))
+        return not self.voice and not self.video and s.import_to_audacity and (s.import_original or (s.separate and s.import_stems))
 
     @property
     def label(self):
@@ -171,11 +185,15 @@ class Runner:
         self.uvr = separation.find_uvr(self.settings.uvr_path)
         return self.uvr
 
-    def add(self, text, playlist=None):
-        """Queue ``text`` (a link or a search) and return its Job."""
+    def add(self, text, playlist=None, voice=None, video=False):
+        """Queue ``text`` (a link or a search) and return its Job.
+
+        With ``voice`` (an artist's name) only the vocals are kept, in that
+        artist's voice dataset folder. With ``video`` it is saved as a video.
+        """
         if playlist is None:
             playlist = bool(self.settings.playlist)
-        job = Job(next(self._ids), text, copy.copy(self.settings), playlist=playlist)
+        job = Job(next(self._ids), text, copy.copy(self.settings), playlist=playlist, voice=voice, video=video)
         self.jobs.append(job)
         if not job.source.supported:
             self._finish(job, FAILED, job.source.problem)
@@ -184,7 +202,7 @@ class Runner:
         return job
 
     def retry(self, job):
-        return self.add(job.text, job.playlist)
+        return self.add(job.text, job.playlist, job.voice, job.video)
 
     def cancel(self, job):
         if job.finished_state:
@@ -252,6 +270,11 @@ class Runner:
                 if job.cancel_event.is_set():
                     return self._finish(job, CANCELLED, "Cancelled.")
 
+        if job.voice:
+            return self._run_voice(job)
+        if job.video:
+            return self._run_video(job)
+
         # Without Audacity this is just a downloader; say so once, not after a wait.
         if job.import_into_audacity and audacity.find_audacity() is None:
             self._warn(job, "Not imported: Audacity is not installed (see the README to set it up).")
@@ -289,6 +312,12 @@ class Runner:
                 self._warn(job, f"Not imported: {error}")
                 import_failed = True
 
+        if settings.detect_bpm and not job.cancel_event.is_set():
+            # Before separating, so the stems carry the tag too. Files that
+            # were already on this PC are measured but left untouched.
+            downloaded = job.source.kind != "local"
+            self._detect_bpm(job, [(path, [path] if downloaded else []) for path in files])
+
         if settings.separate:
             def import_stems(stems):
                 # Stems go in as soon as each model has made them, while
@@ -319,8 +348,12 @@ class Runner:
             text += ", but not everything was imported into Audacity"
         self._finish(job, DONE, text + ".")
 
-    def _download(self, job):
+    def _download(self, job, output_dir=None, audio_format=None, thumbnail=None, skip=None):
+        """Download the job's link. The arguments override the job's settings."""
         settings = job.settings
+        output_dir = output_dir or settings.downloads
+        audio_format = audio_format or settings.audio_format
+        thumbnail = settings.embed_thumbnail if thumbnail is None else thumbnail
         source = job.source
         if source.kind == "local":
             # Nothing to download: use the files where they are.
@@ -336,23 +369,205 @@ class Runner:
         if source.kind == "apple":
             return download_apple_music(
                 source.url,
-                output_dir=settings.downloads,
+                output_dir=output_dir,
                 cookies=settings.apple_cookies or DEFAULT_COOKIES,
                 reporter=reporter,
-                audio_format=settings.audio_format,
+                audio_format=audio_format,
                 bitrate=settings.bitrate,
             )
         return download_audio(
             source.url,
-            output_dir=settings.downloads,
+            output_dir=output_dir,
             # A search is technically a one-item playlist.
             playlist=job.playlist or source.kind == "search",
             quality=settings.bitrate,
             cookies=settings.site_cookies or None,
-            thumbnail=settings.embed_thumbnail,
+            thumbnail=thumbnail,
             reporter=reporter,
-            audio_format=settings.audio_format,
+            audio_format=audio_format,
+            skip=skip,
         )
+
+    def _run_video(self, job):
+        """The Videos tab: save .mp4 videos and, if wanted, their sound as MP3s."""
+        settings = job.settings
+        source = job.source
+        if source.kind == "apple":
+            return self._finish(job, FAILED, "Apple Music has no videos to download. Use the Downloads tab for its songs.")
+        if source.kind == "local":
+            return self._finish(job, FAILED, "That is already on this PC, so there is nothing to download.")
+        try:
+            pairs = download_video(
+                source.url,
+                output_dir=settings.videos,
+                # A search is technically a one-item playlist.
+                playlist=job.playlist or source.kind == "search",
+                quality=settings.video_quality,
+                cookies=settings.site_cookies or None,
+                thumbnail=settings.embed_thumbnail,
+                reporter=JobReporter(job, self.log),
+                mp3=settings.video_mp3,
+                bitrate=settings.bitrate,
+            )
+        except Cancelled:
+            return self._finish(job, CANCELLED, "Cancelled.")
+        except DownloadError as error:
+            return self._finish(job, FAILED, str(error))
+
+        job.files = [path for pair in pairs for path in pair if path]
+        if settings.detect_bpm:
+            # Measured on the MP3 when there is one, and saved in both files.
+            self._detect_bpm(job, [(audio or video, [p for p in (video, audio) if p]) for video, audio in pairs])
+        text = f"Saved {plural(len(pairs), 'video')}"
+        if settings.video_mp3:
+            text += " and its MP3" if len(pairs) == 1 else " and their MP3s"
+        text += f" to {describe_path(settings.videos)}."
+        if job.cancel_event.is_set():
+            return self._finish(job, CANCELLED, f"Cancelled while finding the BPM. {text}")
+        self._finish(job, DONE, text)
+
+    def _detect_bpm(self, job, songs):
+        """Find each song's tempo, save it in the files' tags, and keep it for the card.
+
+        ``songs`` is [(file to listen to, [files to tag]), ...]. A tempo is a
+        bonus: nothing here can fail the download.
+        """
+        for number, (source, targets) in enumerate(songs, 1):
+            if job.cancel_event.is_set():
+                return
+            name = Path(source).stem
+            if len(songs) > 1:
+                job.index, job.total, job.title = number, len(songs), name
+            self._set_stage(job, "Finding the BPM")
+            try:
+                bpm = tempo.detect(source)
+            except Exception as error:
+                self.log(f"#{job.id} No BPM for {name}: {error}", "warning")
+                continue
+            if bpm is None:
+                self.log(f"#{job.id} {name}: no steady beat, so no BPM")
+                continue
+            job.bpms[str(source)] = bpm
+            job.touch()
+            for target in targets:
+                try:
+                    tempo.save(target, bpm)
+                except Exception as error:
+                    self._warn(job, f"Could not save the BPM in {Path(target).name}: {error}")
+            self.log(f"#{job.id} {round(bpm)} BPM  {name}", "success")
+
+    def _run_voice(self, job):
+        """The Voice tab: keep only the artist's dry vocals, in their folder.
+
+        Songs are downloaded losslessly into a scratch folder inside the
+        artist's, separated one by one, and deleted once their vocals are
+        saved. Songs already in the folder are skipped, so the same playlist
+        can be run again after it grows.
+        """
+        settings = job.settings
+        if not voice.folder_name(job.voice):
+            return self._finish(job, FAILED, "The artist's name has nothing in it that can name a folder.")
+        folder = settings.voices / voice.folder_name(job.voice)
+        if separation.engine_info() is None:
+            return self._finish(job, FAILED, "Set up the separation engine in Settings (Ctrl+S) first.")
+        folder.mkdir(parents=True, exist_ok=True)
+
+        known = voice.existing_keys(folder)
+        skipped = set()
+
+        def already_done(title):
+            key = voice.match_key(title)
+            if key not in known:
+                return False
+            if key not in skipped:
+                skipped.add(key)
+                self.log(f"#{job.id} Skipped {title}: it is already in {folder.name}'s folder")
+            return True
+
+        steps = voice.preset(settings.voice_lead_only, settings.voice_reverb)
+        saved, seconds = [], 0.0
+        with temp_workspace(folder) as work:
+            try:
+                # FLAC: lossless, at half the size of WAV for a long playlist.
+                files = self._download(job, output_dir=work, audio_format="flac", thumbnail=False, skip=already_done)
+            except Cancelled:
+                return self._finish(job, CANCELLED, "Cancelled.")
+            except DownloadError as error:
+                if not skipped:  # rather than "every song was skipped"
+                    return self._finish(job, FAILED, str(error))
+                files = []
+
+            for number, song in enumerate(files, 1):
+                if job.cancel_event.is_set():
+                    break
+                if len(files) > 1:
+                    job.index, job.total, job.title = number, len(files), song.stem
+                if self._separation_lock.locked():
+                    self._set_stage(job, "Waiting to separate")
+                with self._separation_lock:
+                    # Checked again here: another job may have just done this
+                    # song, and Apple Music and local files are not filtered
+                    # before they are downloaded.
+                    known = voice.existing_keys(folder)
+                    if already_done(song.stem):
+                        continue
+                    job.step = None
+                    self._set_stage(job, "Separating")
+                    try:
+                        stems = separation.separate(
+                            song,
+                            work,
+                            preset=steps,
+                            audio_format="wav",
+                            cover_art=False,
+                            quality=settings.separation_quality,
+                            device=settings.separation_device,
+                            uvr=self.uvr,
+                            reporter=SeparationReporter(job, self.log),
+                        )
+                    except Cancelled:
+                        break
+                    except separation.SeparationError as error:
+                        self._warn(job, f"{song.stem}: {error}")
+                        continue
+                    finally:
+                        job.step = None
+
+                self._set_stage(job, "Saving vocals")
+                vocals = stems["Vocals"]
+                destination = unique_path(folder / f"{song.stem}.wav")
+                try:
+                    seconds += voice.finish(vocals, destination, settings.voice_trim_silence)
+                except DownloadError as error:
+                    self._warn(job, f"{song.stem}: {error}")
+                    continue
+                finally:
+                    # The separation's own folder, and the song if it was
+                    # downloaded (local files are left where they are).
+                    shutil.rmtree(Path(vocals).parent, ignore_errors=True)
+                    if work in song.parents:
+                        song.unlink(missing_ok=True)
+                saved.append(destination)
+                job.stems.append(destination)
+                job.touch()
+
+        count, total = voice.stats(folder)
+        summary = []
+        if saved:
+            summary.append(
+                f"Saved {voice.format_minutes(seconds)} of vocals from {plural(len(saved), 'song')} "
+                f"to {describe_path(folder)}"
+            )
+        if skipped:
+            summary.append(f"{plural(len(skipped), 'song')} {'was' if len(skipped) == 1 else 'were'} already there")
+        if saved or skipped:
+            summary.append(f"{job.voice} has {voice.format_minutes(total)} in {plural(count, 'song')} now")
+        text = "; ".join(summary) + "." if summary else ""
+        if job.cancel_event.is_set():
+            return self._finish(job, CANCELLED, f"Cancelled. {text}".strip())
+        if not summary:
+            return self._finish(job, FAILED, "No vocals were saved.")
+        self._finish(job, DONE, text)
 
     def _separate(self, job, files, on_stems=None):
         """Split each downloaded file into stems. Returns {song: [stem paths]}.
@@ -438,7 +653,7 @@ class Runner:
             with audacity.connect(timeout, on_wait=lambda: stage("Waiting for Audacity to start")) as session:
                 stage("Importing into Audacity")
                 for number, path in enumerate(files, 1):
-                    session.import_file(Path(path))
+                    job.audacity_window = session.import_file(Path(path), window=job.audacity_window)
                     job.imported += 1
                     if not quietly:
                         job.fraction = number / len(files)

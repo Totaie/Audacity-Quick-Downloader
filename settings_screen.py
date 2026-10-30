@@ -15,12 +15,15 @@ from textual.widgets import Button, Checkbox, Input, ProgressBar, Select, Static
 
 import audacity
 import separation
+import voice
 from settings import (
     AUDIO_FORMATS,
     BITRATES,
     DEVICES,
     PLAYLIST_MODES,
     SEPARATION_QUALITIES,
+    VIDEO_QUALITIES,
+    VOICE_REVERB,
     Settings,
     settings_path,
 )
@@ -241,6 +244,15 @@ class SettingsScreen(Screen):
                 yield hint(id="bitrate-hint")
                 yield row("Playlists", self._select("playlist_mode", PLAYLIST_MODES))
                 yield row("Cover art", Toggle("Embed the thumbnail or album art", s.embed_thumbnail, id="f-embed_thumbnail"))
+                yield row("BPM", Toggle("Find each song's tempo and save it in its tags", s.detect_bpm, id="f-detect_bpm"))
+                yield hint("Shown on each download too. Also used by the Videos tab.")
+
+            with Vertical(classes="section") as section:
+                section.border_title = "Videos"
+                yield row("Save videos to", *path_input("video_dir", s.video_dir, str(s.videos)))
+                yield row("Quality", self._select("video_quality", VIDEO_QUALITIES))
+                yield row("MP3", Toggle("Also save each video's sound as an MP3", s.video_mp3, id="f-video_mp3"))
+                yield hint("Videos are saved as .mp4. The MP3 uses the Downloads bitrate.")
 
             with Vertical(classes="section") as section:
                 section.border_title = "Audacity"
@@ -278,6 +290,15 @@ class SettingsScreen(Screen):
                 yield row("", Toggle("The separated stems", s.import_stems, id="f-import_stems"))
                 yield row("Run on", self._select("separation_device", DEVICES))
                 yield row("UVR5 folder", *path_input("uvr_path", s.uvr_path, "Found automatically"))
+
+            with Vertical(classes="section") as section:
+                section.border_title = "Voice datasets (for training RVC)"
+                yield row("Save vocals to", *path_input("voice_dir", s.voice_dir, str(s.voices)))
+                yield hint("One folder per artist inside it. Point RVC's training at the artist's folder.")
+                yield row("Backing vocals", Toggle("Remove them, keeping only the lead singer", s.voice_lead_only, id="f-voice_lead_only"))
+                yield row("Reverb", self._select("voice_reverb", VOICE_REVERB))
+                yield row("Silence", Toggle("Cut long pauses and instrumental breaks", s.voice_trim_silence, id="f-voice_trim_silence"))
+                yield hint(id="voice-hint")
 
             with Vertical(classes="section") as section:
                 section.border_title = "Cookies (optional)"
@@ -388,6 +409,22 @@ class SettingsScreen(Screen):
 
         downloads = Path(self.value("download_dir") or default_downloads_dir())
         self.query_one("#f-separation_dir", Input).placeholder = str(downloads / "Separated")
+        self.query_one("#f-voice_dir", Input).placeholder = str(downloads / "Voice Datasets")
+        self.query_one("#f-video_dir", Input).placeholder = str(downloads / "Videos")
+
+        steps = voice.preset(self.value("voice_lead_only"), self.value("voice_reverb")).steps_for(quality)
+        models = [step.model for step in steps]
+        text = (
+            f"Each song goes through {', then '.join(Path(m).stem for m in models)}, and is saved as a mono WAV. "
+            f"Uses the Quality setting above ({separation.QUALITY_LEVELS[quality]['label']} here)"
+        )
+        missing = [m for m in models if not (separation.MODEL_CACHE / m).exists() and not (uvr and uvr.find_model(m))]
+        if missing:
+            size = sum(separation.MODEL_SIZES_MB.get(m, 0) for m in missing)
+            text += f"; about {size} MB of models is downloaded the first time."
+        else:
+            text += "."
+        self.set_hint("#voice-hint", text)
 
     def set_hint(self, selector, text):
         hint = self.query_one(selector, Static)
@@ -466,6 +503,7 @@ class SettingsScreen(Screen):
         field = self.query_one(f"#f-{name}", Input)
         initial = field.value or field.placeholder
         title = {"download_dir": "Save downloads to", "separation_dir": "Save separated stems to",
+                 "voice_dir": "Save voice datasets to", "video_dir": "Save videos to",
                  "uvr_path": "Ultimate Vocal Remover's folder"}.get(name, "Choose a file")
 
         def pick():
