@@ -105,9 +105,10 @@ sudo pacman -S --needed git python ffmpeg tk audacity
 ```
 
 `tk` gives Settings its folder picker, and `audacity` is optional (see
-[Setting up Audacity](#setting-up-audacity)). Use the pacman Audacity rather
-than the Flatpak or Snap one: those are sandboxed, and the app cannot reach
-their scripting pipes. For stem separation on an NVIDIA GPU you also want the
+[Setting up Audacity](#setting-up-audacity)). Use the pacman Audacity or the
+Flathub one (`org.audacityteam.Audacity`), not the Snap: the Snap is sandboxed,
+and the app cannot reach its scripting pipes. Audacity 4 has no scripting
+module at all, so the app skips it and uses an Audacity 3 installed alongside. For stem separation on an NVIDIA GPU you also want the
 NVIDIA driver (`nvidia` or `nvidia-open`, with `nvidia-utils`).
 
 **2. Clone the repository and run it**
@@ -151,12 +152,14 @@ where downloads (and separated stems) are saved before you start.
    `Program Files` automatically.
 
    **Arch Linux:** `sudo pacman -S audacity`. The app finds `/usr/bin/audacity`
-   (and `~/.local/bin/audacity` if you keep it there).
+   (and `~/.local/bin/audacity` if you keep it there), and falls back to the
+   Flathub Audacity (`flatpak install flathub org.audacityteam.Audacity`).
+   Audacity 4 is skipped: it has no mod-script-pipe to import with.
 
    If you put it somewhere else, set the `AUDACITY_PATH` environment variable
-   to the full path of the Audacity program. If a Flatpak or Snap Audacity is
-   installed, the app names it in the error, since those sandboxed builds
-   cannot be scripted.
+   to the full path of the Audacity program. If a Snap Audacity is installed,
+   the app names it in the error, since that sandboxed build cannot be
+   scripted.
 2. Open Audacity, go to `Edit > Preferences > Modules`, set **mod-script-pipe**
    to `Enabled`, and restart Audacity. Without this, Audacity has no way to
    accept the import command.

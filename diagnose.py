@@ -33,6 +33,10 @@ def main():
         print(f"  WARNING: a {sandboxed} Audacity is installed, but sandboxed")
         print("  builds cannot be scripted. Install the distribution's Audacity")
         print("  (Arch: sudo pacman -S audacity) or set AUDACITY_PATH.")
+    if audacity.audacity4_installed():
+        print("  NOTE: Audacity 4 is installed, but it has no mod-script-pipe, so it")
+        print("  is skipped. Imports go to an Audacity 3 (pacman or Flatpak).")
+    print(f"  config_path():        {audacity.config_path()}")
     print(f"  script_pipe_enabled(): {audacity.script_pipe_enabled()}")
     if sys.platform != "win32":
         fifos = sorted(p for p in os.listdir("/tmp") if p.startswith("audacity_script_pipe"))
@@ -48,7 +52,7 @@ def main():
         print("Audacity is running, but its executable is not where the app looks.")
         print("  Its scripting pipes are enough to import into; to also let the app")
         print("  start it, set AUDACITY_PATH to the full path of the executable.")
-        print("  Find it with: pid=$(pgrep -x audacity) && ls -l /proc/$pid/exe")
+        print("  Find it with: pid=$(pgrep -x 'audacity|audacity\\.bin') && ls -l /proc/$pid/exe")
         print()
 
     running = audacity.is_running()

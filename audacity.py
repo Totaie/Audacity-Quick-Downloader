@@ -33,6 +33,11 @@ STARTUP_TIMEOUT = 90
 # Importing is quick, but leave headroom for very long recordings.
 COMMAND_TIMEOUT = 60
 
+# The Flathub build shares /tmp with the host, so its pipes are reachable.
+FLATPAK_ID = "org.audacityteam.Audacity"
+# Process names: the native build, and the Flatpak's binary inside the sandbox.
+PROCESS_NAMES = ("audacity", "audacity.bin")
+
 ENABLE_INSTRUCTIONS = (
     "In Audacity, open Edit > Preferences > Modules, set mod-script-pipe to "
     "Enabled, then restart Audacity."
@@ -46,6 +51,41 @@ class AudacityError(RuntimeError):
 # --------------------------------------------------------------------------
 # Finding, starting and inspecting Audacity
 # --------------------------------------------------------------------------
+
+
+def _flatpak_launcher():
+    """The Flatpak Audacity's exported launcher, or None if it is not installed."""
+    if sys.platform in ("win32", "darwin"):
+        return None
+    for root in (
+        Path.home() / ".local" / "share" / "flatpak",
+        Path("/var/lib/flatpak"),
+    ):
+        launcher = root / "exports" / "bin" / FLATPAK_ID
+        if launcher.exists():
+            return launcher
+    return None
+
+
+def is_flatpak(executable):
+    return executable is not None and Path(executable).name == FLATPAK_ID
+
+
+def is_audacity4(executable):
+    """True for an Audacity 4 build, which has no mod-script-pipe to import with.
+
+    Audacity 4 portable is usually started through a small wrapper script
+    (exec .../audacity4/AppRun), so the script's text is checked as well as
+    its path.
+    """
+    path = Path(executable)
+    names = [str(path), str(path.resolve())]
+    try:
+        if path.stat().st_size < 4096:
+            names.append(path.read_text(errors="replace"))
+    except OSError:
+        pass
+    return any("audacity4" in name.lower() or "audacity-4" in name.lower() for name in names)
 
 
 def find_audacity():
@@ -66,19 +106,36 @@ def find_audacity():
     elif sys.platform == "darwin":
         candidates.append(Path("/Applications/Audacity.app/Contents/MacOS/Audacity"))
     else:
-        # The distribution's package (pacman -S audacity on Arch). The Flatpak
-        # and Snap builds are sandboxed, so their scripting pipes are not
-        # reachable from outside and they are deliberately not looked for.
+        # The distribution's package (pacman -S audacity on Arch) first, then
+        # the Flatpak below. The Snap build is sandboxed, so its scripting
+        # pipes are not reachable from outside and it is not looked for.
         candidates.append(Path("/usr/bin/audacity"))
         candidates.append(Path("/usr/local/bin/audacity"))
         candidates.append(Path.home() / ".local" / "bin" / "audacity")
+        on_path = shutil.which("audacity")
+        if on_path:
+            candidates.append(Path(on_path))
 
     for candidate in candidates:
-        if candidate.exists():
+        # Audacity 4 cannot be scripted, so a 3.x install further down wins.
+        if candidate.exists() and not is_audacity4(candidate):
             return candidate
 
+    if sys.platform in ("win32", "darwin"):
+        on_path = shutil.which("audacity")
+        return Path(on_path) if on_path else None
+    return _flatpak_launcher()
+
+
+def audacity4_installed():
+    """True when an Audacity 4 build is where the app looks (Linux only)."""
+    if sys.platform in ("win32", "darwin"):
+        return False
     on_path = shutil.which("audacity")
-    return Path(on_path) if on_path else None
+    candidates = [Path.home() / ".local" / "bin" / "audacity", Path("/usr/local/bin/audacity")]
+    if on_path:
+        candidates.append(Path(on_path))
+    return any(c.exists() and is_audacity4(c) for c in candidates)
 
 
 def is_running():
@@ -101,9 +158,10 @@ def is_running():
                 timeout=20,
             )
             return "audacity.exe" in result.stdout.lower()
+        pattern = "|".join(name.replace(".", r"\.") for name in PROCESS_NAMES)
         return (
             subprocess.run(
-                ["pgrep", "-x", "audacity"], capture_output=True, timeout=20
+                ["pgrep", "-x", pattern], capture_output=True, timeout=20
             ).returncode
             == 0
         )
@@ -116,7 +174,7 @@ def is_running():
                     continue
                 try:
                     with open(f"/proc/{entry}/comm") as comm:
-                        if comm.read().strip() == "audacity":
+                        if comm.read().strip() in PROCESS_NAMES:
                             return True
                 except OSError:
                     continue
@@ -128,23 +186,23 @@ def is_running():
 
 
 def sandboxed_audacity():
-    """'Flatpak' or 'Snap' when one of those Audacity builds is installed, else None.
+    """'Snap' when the Snap Audacity is installed, else None.
 
-    Those builds run in a sandbox: their scripting pipes are not reachable
-    from outside, so this app cannot import into them. Naming the build in an
-    error message is the difference between 'Audacity is not installed' (wrong)
-    and 'install the distribution's Audacity' (actionable).
+    The Snap runs in a sandbox: its scripting pipes are not reachable from
+    outside, so this app cannot import into it. (The Flathub build shares /tmp
+    with the host, so it can be used.) Naming the build in an error message is
+    the difference between 'Audacity is not installed' (wrong) and 'install
+    the distribution's Audacity' (actionable).
     """
     if sys.platform in ("win32", "darwin"):
         return None
     home = Path.home()
     for marker in (
-        home / ".local" / "share" / "flatpak" / "app" / "org.audacity.Audacity",
         home / "snap" / "audacity" / "current",
         Path("/snap/audacity/current"),
     ):
         if marker.exists():
-            return "Flatpak" if "flatpak" in str(marker) else "Snap"
+            return "Snap"
     return None
 
 
@@ -152,6 +210,13 @@ def launch(executable=None):
     """Start Audacity detached from this console and return the executable used."""
     executable = Path(executable) if executable else find_audacity()
     if executable is None:
+        if audacity4_installed():
+            raise AudacityError(
+                "Only Audacity 4 was found, and Audacity 4 has no scripting module "
+                "(mod-script-pipe) to import with. Install Audacity 3 alongside it "
+                "(on Arch: sudo pacman -S audacity, or flatpak install flathub "
+                f"{FLATPAK_ID}), or set AUDACITY_PATH."
+            )
         sandboxed = sandboxed_audacity()
         if sandboxed:
             raise AudacityError(
@@ -203,6 +268,11 @@ def config_path():
             / "Application Support"
             / "audacity"
             / "audacity.cfg"
+        )
+    # The Flatpak keeps its settings inside its own data folder.
+    if is_flatpak(find_audacity()):
+        return (
+            Path.home() / ".var" / "app" / FLATPAK_ID / "config" / "audacity" / "audacity.cfg"
         )
     # Audacity 3.2+ uses ~/.config/audacity, unless the older
     # ~/.audacity-data folder is already there.
@@ -311,8 +381,9 @@ def ensure_running(auto_launch=True, ask=None, log=print):
 
 def connection_hint():
     """A message explaining why the pipes are missing, as best we can tell."""
+    executable = find_audacity()
     sandboxed = sandboxed_audacity()
-    if sandboxed:
+    if sandboxed and executable is None:
         return (
             f"A {sandboxed} Audacity is installed, but sandboxed builds keep their "
             "scripting pipes inside the sandbox, where this app cannot reach them. "
@@ -325,10 +396,16 @@ def connection_hint():
             "Audacity is running without the scripting module. " + ENABLE_INSTRUCTIONS
         )
     if is_running():
+        flatpak = (
+            " The Flatpak must be able to see /tmp: flatpak override --user "
+            f"--filesystem=/tmp {FLATPAK_ID}"
+            if is_flatpak(executable)
+            else ""
+        )
         return (
             "Audacity is running but is not answering on its scripting pipes. "
             "Close any other script that is using them, restart Audacity, and "
-            f"check that mod-script-pipe is enabled. {ENABLE_INSTRUCTIONS}"
+            f"check that mod-script-pipe is enabled. {ENABLE_INSTRUCTIONS}{flatpak}"
         )
     return f"Audacity does not appear to be running. {ENABLE_INSTRUCTIONS}"
 
