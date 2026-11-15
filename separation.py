@@ -24,6 +24,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import stemcache
 from formats import convert_audio
 from utils import Cancelled, DownloadError, Reporter, python_executable, strip_ansi
 
@@ -767,6 +768,65 @@ def unique_folder(parent, name):
     return folder
 
 
+def _plan_steps(song, steps, overlap, cache, reporter):
+    """The worker's steps for ``song``, using (and filling) the stem cache.
+
+    Returns (steps, the cache's Song or None). Each step is keyed by the
+    chain of models that led to it, so a step is reused whatever preset it
+    came from. Steps that only make inputs for later steps, all of which
+    are cached, are left out altogether.
+    """
+    plain = [
+        {"model": step.model, "source": step.source, "stems": dict(step.stems), "merge": dict(step.merge)}
+        for step in steps
+    ]
+    if cache is None:
+        return plain, None
+    try:
+        cached_song = cache.identify(song)
+    except Exception as error:  # the cache must never stop a separation
+        reporter.log(f"Not using the stem cache: {error}", "warning")
+        return plain, None
+    if cached_song is None:
+        return plain, None
+
+    keys = {"song": "song"}
+    for job_step in plain:
+        key = stemcache.step_key(keys.get(job_step["source"], job_step["source"]), job_step["model"], overlap)
+        for model_stem, ours in job_step["stems"].items():
+            keys[ours] = f"{key}/{model_stem}"
+        found = cache.find(cached_song, key, list(job_step["stems"]))
+        if found:
+            job_step["cached"] = {stem: str(path) for stem, path in found.items()}
+        else:
+            job_step["cache"] = {
+                stem: str(path) for stem, path in cache.targets(cached_song, key, list(job_step["stems"])).items()
+            }
+
+    # Working backwards: which steps are still needed?
+    required, needed = set(), []
+    for job_step in reversed(plain):
+        outputs = list(job_step["stems"].values()) + list(job_step["merge"])
+        wanted = any(not name.startswith("_") for name in outputs) or any(name in required for name in outputs)
+        if not wanted:
+            continue
+        needed.append(job_step)
+        if not job_step.get("cached"):
+            required.add(job_step["source"])
+        for parts in job_step["merge"].values():
+            required.update(parts)
+    needed.reverse()
+
+    reused = sum(1 for job_step in plain if job_step.get("cached") or job_step not in needed)
+    if reused:
+        if reused == len(plain):
+            text = "using the stems from last time, no models needed"
+        else:
+            text = f"reusing {reused} of its {len(plain)} models' stems from last time"
+        reporter.log(f"{song.stem} was separated before: {text}", "success")
+    return needed, cached_song
+
+
 def separate(
     song,
     output_root,
@@ -779,6 +839,7 @@ def separate(
     uvr=None,
     reporter=None,
     on_stems=None,
+    cache=None,
 ):
     """Split ``song`` into stems in a new folder under ``output_root``.
 
@@ -787,6 +848,8 @@ def separate(
     ``on_stems({name: path})`` is called (on another thread) with each batch
     of stems as soon as they are saved, while later models are still running.
     ``preset`` is the name of one of PRESETS, or a Preset of its own.
+    ``cache`` (a stemcache.StemCache) skips every model that has already
+    run on this song (in any format), and keeps what the others make.
     Returns {stem name: path}, e.g. {"Vocals": ..., "Instrumental": ...}.
     """
     reporter = reporter or Reporter()
@@ -814,9 +877,10 @@ def separate(
             )
 
     song = Path(song)
+    job_steps, cached_song = _plan_steps(song, steps, tuning(quality, device)["overlap"], cache, reporter)
     output = unique_folder(output_root, song.stem)
     output.mkdir(parents=True)
-    _link_models([step.model for step in steps], uvr)
+    _link_models([step["model"] for step in job_steps if not step.get("cached")], uvr)
 
     job = {
         "input": str(song),
@@ -827,10 +891,7 @@ def separate(
         # output is the next one's input, and lossy steps would compound.
         "format": "wav",
         "tuning": tuning(quality, device),
-        "steps": [
-            {"model": step.model, "source": step.source, "stems": step.stems, "merge": step.merge}
-            for step in steps
-        ],
+        "steps": job_steps,
     }
     environment = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
     if device == "cpu":
@@ -954,6 +1015,12 @@ def separate(
         ready.put(None)
         reporter.stage("Saving stems")
         converter.join()
+        if cached_song is not None:
+            # Even after a failure: the models that finished are kept.
+            try:
+                cache.commit(cached_song)
+            except OSError as error:
+                reporter.log(f"Could not update the stem cache: {error}", "warning")
         if reporter.cancelled and not stems:
             shutil.rmtree(output, ignore_errors=True)
 

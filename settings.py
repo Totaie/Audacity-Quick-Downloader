@@ -14,6 +14,7 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 from formats import AUDIO_FORMATS, BITRATES
+from stemcache import LIMITS_GB
 from utils import default_downloads_dir
 
 APP_NAME = "AudacityQuickDownloader"
@@ -27,6 +28,8 @@ SEPARATION_QUALITIES = {
 }
 DEVICES = {"auto": "Automatic", "gpu": "GPU (NVIDIA)", "cpu": "CPU only"}
 VOICE_REVERB = {"reverb": "Remove reverb and echo", "off": "Keep them"}
+MASHUP_TEMPOS = {"beat": "The instrumental's tempo (only the vocals are stretched)", "halfway": "Meet halfway (both are stretched a little)"}
+MASHUP_VOCALS = {"first": "Song 1", "second": "Song 2"}
 VIDEO_QUALITIES = {
     "best": "Best available (4K and up, may be VP9/AV1)",
     "2160": "Up to 4K",
@@ -75,6 +78,8 @@ class Settings:
     import_stems: bool = True
     separation_device: str = "auto"
     uvr_path: str = ""  # blank means find it automatically
+    reuse_separations: bool = True  # keep every model's output, and skip it next time (stemcache.py)
+    stem_cache_gb: int = 10
 
     # The Videos tab
     video_dir: str = ""
@@ -86,6 +91,13 @@ class Settings:
     voice_lead_only: bool = True
     voice_reverb: str = "reverb"
     voice_trim_silence: bool = True
+
+    # The Mashup tab: two songs on one beat (mashup.py)
+    mashup_dir: str = ""
+    mashup_vocals: str = "first"  # which song the vocals come from
+    mashup_tempo: str = "beat"
+    mashup_key: bool = True  # move the vocals song into the other's key
+    mashup_import_all: bool = False  # all four stems, not just the vocals and the instrumental
 
     # Cookies
     apple_cookies: str = ""
@@ -122,6 +134,13 @@ class Settings:
         return self.downloads / "Voice Datasets"
 
     @property
+    def mashups(self):
+        """Where the Mashup tab saves, one folder per mashup."""
+        if self.mashup_dir:
+            return Path(self.mashup_dir).expanduser()
+        return self.downloads / "Mashups"
+
+    @property
     def playlist(self):
         """The playlist mode as the rest of the app wants it: None, True or False."""
         return {"ask": None, "all": True, "one": False}.get(self.playlist_mode)
@@ -139,6 +158,9 @@ class Settings:
             "separation_quality": SEPARATION_QUALITIES,
             "voice_reverb": VOICE_REVERB,
             "video_quality": VIDEO_QUALITIES,
+            "mashup_tempo": MASHUP_TEMPOS,
+            "stem_cache_gb": LIMITS_GB,
+            "mashup_vocals": MASHUP_VOCALS,
         }
         for name, allowed in choices.items():
             if getattr(self, name) not in allowed:

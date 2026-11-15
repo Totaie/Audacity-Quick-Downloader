@@ -4,9 +4,11 @@ The screen is kept deliberately quiet: a box to paste into, three chips for
 the choices people change often, the list of downloads, and one line of key
 hints. Everything else lives in Settings (Ctrl+S).
 
-Two more tabs sit beside Downloads: Videos saves .mp4 videos (and their
-sound as MP3s), and Voice datasets takes an artist's name and links to their
-songs, and keeps only their dry vocals, for training an RVC voice model.
+Three more tabs sit beside Downloads: Videos saves .mp4 videos (and their
+sound as MP3s), Voice datasets takes an artist's name and links to their
+songs, and keeps only their dry vocals, for training an RVC voice model, and
+Mashup takes two songs and puts one's vocals over the other's instrumental,
+at one tempo and on the same beat.
 """
 
 import threading
@@ -22,6 +24,7 @@ from textual.suggester import SuggestFromList
 from textual.widgets import Button, Input, ProgressBar, RichLog, Static, TabbedContent, TabPane
 
 import audacity
+import mashup
 import separation
 import voice
 from jobs import CANCELLED, DONE, FAILED, QUEUED, RUNNING, Runner
@@ -36,7 +39,8 @@ PLAYLIST_LABELS = {"ask": "Ask", "all": "Whole playlist", "one": "Just the track
 STEM_CHOICES = [None] + list(separation.PRESETS)  # None means off
 REVERB_LABELS = {"reverb": "Removed", "off": "Kept"}
 VIDEO_QUALITY_LABELS = {"1080": "1080p", "720": "720p", "480": "480p", "best": "Best", "1440": "1440p", "2160": "4K"}
-TABS = ["tab-downloads", "tab-videos", "tab-voice"]
+TABS = ["tab-downloads", "tab-videos", "tab-voice", "tab-mashup"]
+MASHUP_TEMPO_LABELS = {"beat": "Instrumental's", "halfway": "Meet halfway"}
 
 LOG_STYLES = {"info": "", "success": "green", "warning": "yellow", "error": "bold red"}
 
@@ -61,6 +65,13 @@ VOICE_WELCOME = """\
 [dim]Name the artist, then paste YouTube or Apple Music playlists, albums or songs.
 Only their dry lead vocals are kept, all in one folder, ready for RVC.
 Songs already in the folder are skipped, so a playlist can be run again as it grows.[/dim]"""
+
+MASHUP_WELCOME = """\
+[b]Two songs, one beat[/b]
+
+[dim]Give a song in each box: a link, a song name, or a file on this PC.
+Both are separated, brought to one tempo and key, lined up on the bar,
+and one's vocals go over the other's instrumental in a new Audacity project.[/dim]"""
 
 
 def format_speed(speed):
@@ -243,7 +254,10 @@ class JobCard(Vertical, can_focus=True):
         job = self.job
         # Only the site's name gets its brand colour, not the whole line.
         text = Text()
-        text.append(job.source.name, style=SITE_COLORS.get(job.source.name) or "dim")
+        if job.mashup:
+            text.append("Mashup", style="magenta")
+        else:
+            text.append(job.source.name, style=SITE_COLORS.get(job.source.name) or "dim")
 
         def add(part, style="dim"):
             if part:
@@ -255,7 +269,10 @@ class JobCard(Vertical, can_focus=True):
         if job.state == QUEUED:
             add("waiting for a free slot")
         elif job.state == RUNNING:
-            if job.total and job.total > 1:
+            if job.mashup:
+                if job.index:
+                    add(f"Song {job.index}" + (f": {job.title}" if job.title else ""))
+            elif job.total and job.total > 1:
                 track = f"{job.index}/{job.total}"
                 if job.title and job.title != job.label:
                     track += f" {job.title}"
@@ -355,6 +372,22 @@ class DownloaderApp(App):
     #voice-url {
         width: 1fr;
         margin: 1 2 0 1;
+    }
+    #mashup-inputs {
+        height: auto;
+    }
+    #mashup-a {
+        width: 1fr;
+        margin: 1 0 0 2;
+    }
+    #mashup-x {
+        width: auto;
+        margin: 2 1 0 1;
+        color: $text-muted;
+    }
+    #mashup-b {
+        width: 1fr;
+        margin: 1 2 0 0;
     }
 
     .chips {
@@ -580,6 +613,19 @@ class DownloaderApp(App):
                     yield Static(id="voice-folder", classes="folder")
                 with VerticalScroll(id="voice-jobs", classes="jobs"):
                     yield Static(VOICE_WELCOME, id="voice-empty", classes="empty")
+            with TabPane("Mashup", id="tab-mashup"):
+                with Horizontal(id="mashup-inputs"):
+                    yield UrlInput(id="mashup-a", classes="link")
+                    yield Static("×", id="mashup-x")
+                    yield UrlInput(id="mashup-b", classes="link")
+                with Horizontal(classes="chips"):
+                    yield Chip("swap_mashup_vocals", id="chip-mashup-vocals")
+                    yield Chip("cycle_mashup_tempo", id="chip-mashup-tempo")
+                    yield Chip("toggle_mashup_key", id="chip-mashup-key")
+                    yield Chip("toggle_mashup_import_all", id="chip-mashup-import")
+                    yield Static(id="mashup-folder", classes="folder")
+                with VerticalScroll(id="mashup-jobs", classes="jobs"):
+                    yield Static(MASHUP_WELCOME, id="mashup-empty", classes="empty")
         log = RichLog(id="log", wrap=True, markup=False, max_lines=500)
         log.border_title = "Activity"
         yield log
@@ -597,6 +643,9 @@ class DownloaderApp(App):
         self.voice_empty_view = self.query_one("#voice-empty")
         self.video_jobs_view = self.query_one("#video-jobs")
         self.video_empty_view = self.query_one("#video-empty")
+        self.mashup_jobs_view = self.query_one("#mashup-jobs")
+        self.mashup_empty_view = self.query_one("#mashup-empty")
+        self.mashup_inputs = (self.query_one("#mashup-a", Input), self.query_one("#mashup-b", Input))
         self.voice_folder_view = self.query_one("#voice-folder", Static)
         self.artist_input = self.query_one("#artist", Input)
         self.log_view = self.query_one("#log", RichLog)
@@ -662,6 +711,27 @@ class DownloaderApp(App):
         event.input.clear()
         for entry in entries:
             self.queue(entry, voice=artist)
+
+    @on(Input.Submitted, "#mashup-a, #mashup-b")
+    def mashup_submitted(self, event):
+        first, second = (" ".join(box.value.split()) for box in self.mashup_inputs)
+        # Two links pasted into one box are both songs.
+        if bool(first) != bool(second):
+            entries = split_input(first or second)
+            if len(entries) == 2:
+                first, second = entries
+        if not first or not second:
+            empty = self.mashup_inputs[0 if not first else 1]
+            if event.input is not empty:
+                empty.focus()
+            else:
+                self.notify("A mashup needs a song in each box.", title="One more song", severity="warning")
+            return
+        for box in self.mashup_inputs:
+            box.clear()
+        self.runner.add(first, mashup=second)
+        self.refresh_jobs()
+        self.mashup_inputs[0].focus()
 
     def queue(self, text, voice=None, video=False):
         source = identify(text)
@@ -742,6 +812,21 @@ class DownloaderApp(App):
         self.query_one("#chip-trim", Chip).show(
             "Silence", "Trimmed" if settings.voice_trim_silence else "Kept", settings.voice_trim_silence
         )
+        vocals_first = settings.mashup_vocals != "second"
+        self.query_one("#chip-mashup-vocals", Chip).show("Vocals from", "Song 1" if vocals_first else "Song 2", True)
+        self.query_one("#chip-mashup-tempo", Chip).show(
+            "Tempo", MASHUP_TEMPO_LABELS.get(settings.mashup_tempo, "Instrumental's"), True
+        )
+        self.query_one("#chip-mashup-key", Chip).show(
+            "Key", "Matched" if settings.mashup_key else "Kept", settings.mashup_key
+        )
+        self.query_one("#chip-mashup-import", Chip).show(
+            "Import", "All 4 stems" if settings.mashup_import_all else "The mashup", True
+        )
+        roles = ("vocals", "instrumental") if vocals_first else ("instrumental", "vocals")
+        for number, (box, role) in enumerate(zip(self.mashup_inputs, roles), 1):
+            box.placeholder = f"Song {number} ({role}): a link, song name or file"
+        self.query_one("#mashup-folder", Static).update(f"→ {describe_path(settings.mashups)}")
         self.artist_input.suggester = SuggestFromList(voice.artist_folders(settings.voices), case_sensitive=False)
         self.show_voice_folder()
 
@@ -775,6 +860,26 @@ class DownloaderApp(App):
         current = self.settings.video_quality
         index = cycle.index(current) if current in cycle else -1
         self.settings.video_quality = cycle[(index + 1) % len(cycle)]
+        self.show_chips()
+
+    # The Mashup tab's chips.
+
+    def action_swap_mashup_vocals(self):
+        self.settings.mashup_vocals = "first" if self.settings.mashup_vocals == "second" else "second"
+        self.show_chips()
+
+    def action_cycle_mashup_tempo(self):
+        modes = list(MASHUP_TEMPO_LABELS)
+        index = modes.index(self.settings.mashup_tempo) if self.settings.mashup_tempo in modes else 0
+        self.settings.mashup_tempo = modes[(index + 1) % len(modes)]
+        self.show_chips()
+
+    def action_toggle_mashup_key(self):
+        self.settings.mashup_key = not self.settings.mashup_key
+        self.show_chips()
+
+    def action_toggle_mashup_import_all(self):
+        self.settings.mashup_import_all = not self.settings.mashup_import_all
         self.show_chips()
 
     # The Voice tab's chips.
@@ -835,7 +940,12 @@ class DownloaderApp(App):
             card = self.cards.get(job.id)
             if card is None:
                 # Voice and video jobs are listed on their own tabs.
-                container = self.voice_jobs_view if job.voice else self.video_jobs_view if job.video else self.jobs_view
+                container = (
+                    self.voice_jobs_view if job.voice
+                    else self.video_jobs_view if job.video
+                    else self.mashup_jobs_view if job.mashup
+                    else self.jobs_view
+                )
                 card = self.cards[job.id] = JobCard(job)
                 container.mount(card, before=0)
                 container.scroll_home(animate=False)
@@ -848,7 +958,8 @@ class DownloaderApp(App):
                 if job.voice:
                     self.show_chips()  # a new artist folder, or more minutes
 
-        self.empty_view.display = not any(not job.voice and not job.video for job in jobs)
+        self.empty_view.display = not any(not job.voice and not job.video and not job.mashup for job in jobs)
+        self.mashup_empty_view.display = not any(job.mashup for job in jobs)
         self.video_empty_view.display = not any(job.video for job in jobs)
         self.voice_empty_view.display = not any(job.voice for job in jobs)
         if any(job.voice and job.state == RUNNING for job in jobs):
@@ -991,12 +1102,18 @@ class DownloaderApp(App):
     def on_video_tab(self):
         return self.tabs.active == "tab-videos"
 
+    @property
+    def on_mashup_tab(self):
+        return self.tabs.active == "tab-mashup"
+
     def action_open_folder(self):
         folder = self.settings.downloads
         if self.on_voice_tab:
             folder = self.voice_folder() or self.settings.voices
         elif self.on_video_tab:
             folder = self.settings.videos
+        elif self.on_mashup_tab:
+            folder = self.settings.mashups
         folder.mkdir(parents=True, exist_ok=True)
         reveal(folder)
 
@@ -1011,6 +1128,9 @@ class DownloaderApp(App):
     def action_focus_input(self):
         if self.on_video_tab:
             self.query_one("#video-url").focus()
+        elif self.on_mashup_tab:
+            first, second = self.mashup_inputs
+            (second if first.value.strip() and not second.value.strip() else first).focus()
         elif not self.on_voice_tab:
             self.query_one("#url").focus()
         elif self.artist_input.value.strip():
@@ -1025,7 +1145,12 @@ class DownloaderApp(App):
         self._move_card_focus(-1)
 
     def _move_card_focus(self, step):
-        view = self.voice_jobs_view if self.on_voice_tab else self.video_jobs_view if self.on_video_tab else self.jobs_view
+        view = (
+            self.voice_jobs_view if self.on_voice_tab
+            else self.video_jobs_view if self.on_video_tab
+            else self.mashup_jobs_view if self.on_mashup_tab
+            else self.jobs_view
+        )
         cards = list(view.query(JobCard))
         if not cards:
             return

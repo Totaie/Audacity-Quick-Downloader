@@ -15,11 +15,14 @@ from textual.widgets import Button, Checkbox, Input, ProgressBar, Select, Static
 
 import audacity
 import separation
+import stemcache
 import voice
 from settings import (
     AUDIO_FORMATS,
     BITRATES,
     DEVICES,
+    MASHUP_TEMPOS,
+    MASHUP_VOCALS,
     PLAYLIST_MODES,
     SEPARATION_QUALITIES,
     VIDEO_QUALITIES,
@@ -289,6 +292,17 @@ class SettingsScreen(Screen):
                 yield row("Import into Audacity", Toggle("The original song", s.import_original, id="f-import_original"))
                 yield row("", Toggle("The separated stems", s.import_stems, id="f-import_stems"))
                 yield row("Run on", self._select("separation_device", DEVICES))
+                yield row("Reuse separations", Toggle(
+                    "Skip the models for songs separated before, on any tab", s.reuse_separations,
+                    id="f-reuse_separations",
+                ))
+                yield row("Keep up to", self._select("stem_cache_gb", stemcache.LIMITS_GB),
+                          Static(id="cache-status", classes="status"),
+                          Button("Clear", compact=True, id="cache-clear"))
+                yield hint(
+                    "Every model's output is kept, so a song that comes round again (in any format, "
+                    "from any tab) is not separated twice. The songs used longest ago go first."
+                )
                 yield row("UVR5 folder", *path_input("uvr_path", s.uvr_path, "Found automatically"))
 
             with Vertical(classes="section") as section:
@@ -299,6 +313,20 @@ class SettingsScreen(Screen):
                 yield row("Reverb", self._select("voice_reverb", VOICE_REVERB))
                 yield row("Silence", Toggle("Cut long pauses and instrumental breaks", s.voice_trim_silence, id="f-voice_trim_silence"))
                 yield hint(id="voice-hint")
+
+            with Vertical(classes="section") as section:
+                section.border_title = "Mashups"
+                yield row("Save mashups to", *path_input("mashup_dir", s.mashup_dir, str(s.mashups)))
+                yield hint("One folder per mashup, with all four stems at the shared tempo and key, lined up on the bar.")
+                yield row("Vocals from", self._select("mashup_vocals", MASHUP_VOCALS))
+                yield row("Tempo", self._select("mashup_tempo", MASHUP_TEMPOS))
+                yield row("Key", Toggle(
+                    "Move the vocals song into the other's key", s.mashup_key, id="f-mashup_key",
+                ))
+                yield row("Import into Audacity", Toggle(
+                    "All four stems, not just the vocals and the instrumental",
+                    s.mashup_import_all, id="f-mashup_import_all",
+                ))
 
             with Vertical(classes="section") as section:
                 section.border_title = "Cookies (optional)"
@@ -323,8 +351,41 @@ class SettingsScreen(Screen):
             value = options[0][1]
         return Select(options, value=value, allow_blank=False, compact=True, id=f"f-{name}")
 
+    @property
+    def stem_cache(self):
+        runner = getattr(self.app, "runner", None)
+        return runner.stem_cache if runner is not None else stemcache.StemCache()
+
+    def show_cache(self):
+        """How much the stem cache holds. Worked out off the interface thread: it walks the folder."""
+
+        def measure():
+            cache = self.stem_cache
+            count, size = cache.count(), cache.size()
+            text = f"{count} song{'' if count == 1 else 's'}, {stemcache.describe_size(size)}" if count else "Empty"
+            self.app.call_from_thread(self.query_one("#cache-status", Static).update, text)
+            self.app.call_from_thread(setattr, self.query_one("#cache-clear", Button), "disabled", not count)
+
+        self.run_worker(measure, thread=True, exclusive=True, group="cache")
+
+    @on(Button.Pressed, "#cache-clear")
+    def cache_clear(self):
+        from tui import ConfirmScreen
+
+        def answered(yes):
+            if yes:
+                self.stem_cache.clear()
+                self.show_cache()
+
+        self.app.push_screen(
+            ConfirmScreen("Delete every saved separation?\nSongs will be separated again the next time.",
+                          yes="Clear", no="Keep", default=False),
+            answered,
+        )
+
     def on_mount(self):
         self.title = "Settings"
+        self.show_cache()
         self.refresh_state()
         self.set_interval(0.25, self.refresh_engine)
         self.refresh_engine()
@@ -411,6 +472,7 @@ class SettingsScreen(Screen):
         self.query_one("#f-separation_dir", Input).placeholder = str(downloads / "Separated")
         self.query_one("#f-voice_dir", Input).placeholder = str(downloads / "Voice Datasets")
         self.query_one("#f-video_dir", Input).placeholder = str(downloads / "Videos")
+        self.query_one("#f-mashup_dir", Input).placeholder = str(downloads / "Mashups")
 
         steps = voice.preset(self.value("voice_lead_only"), self.value("voice_reverb")).steps_for(quality)
         models = [step.model for step in steps]
@@ -504,6 +566,7 @@ class SettingsScreen(Screen):
         initial = field.value or field.placeholder
         title = {"download_dir": "Save downloads to", "separation_dir": "Save separated stems to",
                  "voice_dir": "Save voice datasets to", "video_dir": "Save videos to",
+                 "mashup_dir": "Save mashups to",
                  "uvr_path": "Ultimate Vocal Remover's folder"}.get(name, "Choose a file")
 
         def pick():

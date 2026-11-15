@@ -11,6 +11,10 @@ line on stdout:
     {"event": "done", "stems": {"Vocals": "C:/.../Song (Vocals).wav", ...}}
     {"event": "error", "message": "..."}
 
+A step can carry "cached": {model stem: file} (that model's output from an
+earlier run on the same song, see stemcache.py), and is then not run at all;
+or "cache": {model stem: file} to save the model's output to, for next time.
+
 Run with --check to confirm the engine loads, and see whether a GPU is used,
 or with --download <model folder> <model>... to fetch models ahead of time.
 """
@@ -18,6 +22,7 @@ or with --download <model folder> <model>... to fetch models ahead of time.
 import json
 import logging
 import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -132,17 +137,16 @@ def onnx_runs_on_cuda(onnxruntime):
     return session.get_providers()[0] == "CUDAExecutionProvider"
 
 
-def run(job):
+def make_separator(job):
     patch_progress_bars()
     use_extra_models()
     from audio_separator.separator import Separator
 
-    output_dir = Path(job["output_dir"])
     tuning = job.get("tuning") or {}
-    separator = Separator(
+    return Separator(
         log_level=logging.WARNING,
         model_file_dir=job["model_dir"],
-        output_dir=str(output_dir),
+        output_dir=job["output_dir"],
         output_format=job["format"].upper(),
         # Roformer models: how many overlapping windows each moment is
         # predicted in (None keeps the model's own setting).
@@ -156,15 +160,37 @@ def run(job):
         use_autocast=bool(tuning.get("autocast")),
     )
 
+
+def save_for_later(source, destination):
+    """Keep a model's output in the stem cache, as 16-bit FLAC (what the WAVs hold).
+
+    Through a .part file, so a half written file is never taken for a whole
+    one. A failure here only costs the time saved next time.
+    """
+    import soundfile
+
+    destination = Path(destination)
+    partial = destination.with_name(destination.name + ".part")
+    try:
+        audio, rate = soundfile.read(source, dtype="float32", always_2d=True)
+        soundfile.write(partial, audio, rate, format="FLAC", subtype="PCM_16")
+        partial.replace(destination)
+    except Exception as error:
+        partial.unlink(missing_ok=True)
+        emit("log", text=f"Could not keep {Path(source).name} for next time: {error}", level="warning")
+
+
+def run(job):
+    output_dir = Path(job["output_dir"])
+    # Only loaded when a model actually has to run: with every step cached,
+    # PyTorch is never even imported.
+    separator = None
+
     # Every stem made so far, by our name. "song" is the downloaded file.
     stems = {"song": Path(job["input"])}
     for index, step in enumerate(job["steps"], 1):
         model = step["model"]
         emit("step", index=index, label=Path(model).stem)
-        first_use = not (Path(job["model_dir"]) / model).exists()
-        emit("stage", text="Downloading model (first use only)" if first_use else "Loading model")
-        separator.load_model(model_filename=model)
-        emit("stage", text="Separating")
 
         # audio-separator "sanitises" names it is given (collapsing underscores,
         # trimming dots...), so it writes plain names like "step1-Vocals" that
@@ -173,7 +199,23 @@ def run(job):
             model_stem: f"step{index}-{ours.lstrip('_')}"
             for model_stem, ours in step["stems"].items()
         }
-        files = separator.separate(str(stems[step["source"]]), custom_output_names=names)
+        cached = step.get("cached")
+        if cached:
+            # Separated before: copies, as the files are renamed below.
+            emit("stage", text="Using the stems from last time")
+            files = []
+            for model_stem, source in cached.items():
+                copy = output_dir / f"{names[model_stem]}{Path(source).suffix}"
+                shutil.copyfile(source, copy)
+                files.append(str(copy))
+        else:
+            if separator is None:
+                separator = make_separator(job)
+            first_use = not (Path(job["model_dir"]) / model).exists()
+            emit("stage", text="Downloading model (first use only)" if first_use else "Loading model")
+            separator.load_model(model_filename=model)
+            emit("stage", text="Separating")
+            files = separator.separate(str(stems[step["source"]]), custom_output_names=names)
 
         made = {}
         for file in files:
@@ -195,6 +237,10 @@ def run(job):
                 f"(got {', '.join(Path(f).name for f in files) or 'nothing'})"
             )
         stems.update(made)
+        if not cached and step.get("cache"):
+            emit("stage", text="Keeping the stems for next time")
+            for model_stem, destination in step["cache"].items():
+                save_for_later(made[step["stems"][model_stem]], destination)
 
         # Some presets fold stems together, e.g. guitar + piano + other.
         for ours, parts in (step.get("merge") or {}).items():

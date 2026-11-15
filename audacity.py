@@ -7,6 +7,7 @@ then sends commands over them with sensible timeouts so a stuck Audacity can
 never hang the downloader forever.
 """
 
+import json
 import os
 import queue
 import shutil
@@ -563,6 +564,65 @@ class Audacity:
         if "failed" in response.lower():
             raise AudacityError(f"Audacity could not import {path.name}: {response.strip()}")
         return window
+
+    def save_project(self, path, window=None):
+        """Save the project in ``window`` (or the active one) as ``path``, an .aup3 file.
+
+        Saving is what gives a new project its name: its window is titled
+        after the file from then on. Returns the window, as import_file does.
+        """
+        path = Path(path).resolve()
+        current = active_window()
+        if window not in project_windows():
+            window = current
+        if window is not None:
+            _activate(window)
+        try:
+            response = self.command(f'SaveProject2: Filename="{path}" AddToHistory=0')
+        finally:
+            if window is not None and current is not None and window != current:
+                _activate(current)
+        if "failed" in response.lower() or not path.exists():
+            raise AudacityError(f"Audacity could not save the project as {path.name}: {response.strip()}")
+        return window
+
+    def track_count(self, window=None):
+        """How many tracks the project in ``window`` (or the active one) has, or None if unknown."""
+        if window is not None:
+            _activate(window)
+        response = self.command("GetInfo: Type=Tracks Format=JSON")
+        start, end = response.find("["), response.rfind("]")
+        if start < 0 or end < start:
+            return None
+        try:
+            return len(json.loads(response[start:end + 1]))
+        except ValueError:
+            return None
+
+    def empty_project(self):
+        """A project window with nothing in it, for tracks that belong together.
+
+        The active project is used if it is empty (Audacity has just started,
+        say); otherwise a new project window is opened. Returns the window to
+        pass to import_file(), or None off Windows, where the new project is
+        simply the active one.
+        """
+        current = active_window()
+        if self.track_count(current) == 0:
+            return current
+        before = set(project_windows())
+        response = self.command("New:")
+        if "failed" in response.lower():
+            raise AudacityError(f"Audacity could not open a new project: {response.strip()}")
+        if sys.platform != "win32":
+            return None
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            new = [window for window in project_windows() if window not in before]
+            if new:
+                return new[0]
+            time.sleep(0.2)
+        return None
 
 
 def connect(timeout=STARTUP_TIMEOUT, command_timeout=COMMAND_TIMEOUT, on_wait=None):

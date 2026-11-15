@@ -39,6 +39,9 @@ Runs on **Windows** and **Linux** (made on Arch, works on any distribution).
   playlists, albums or songs, and keeps only their dry lead vocals (no
   instruments, no backing vocals, no reverb) in one folder, ready for training
   an RVC voice model.
+- **Mashups.** A Mashup tab takes two songs, separates both, brings them to
+  one tempo and key, lines up their bars, balances the levels and puts one's
+  vocals over the other's instrumental in a new Audacity project.
 - **A settings screen** (`Ctrl+S`) for your defaults: where things are saved,
   the audio format and bitrate, Audacity behaviour, separation presets and
   more. They are saved per user, so an update never resets them.
@@ -288,6 +291,29 @@ bitrate, with the song's tags (titled like `Song (Vocals)`) and cover art. The
 just for this session. Separations run one at a time; downloads carry on in
 parallel.
 
+### Separating the same song again
+
+Every model's output is kept, so a song is never put through the same
+model twice: separate a song on the Downloads tab, then use it in a mashup,
+and the mashup skips straight past separating. It works across tabs and
+presets, since many presets begin with the same model: a voice dataset from
+a song you already split into vocals and instrumental only runs its last two
+models. A song separated before shows "Using the stems from last time" on
+its card, and the activity log says how many models it skipped.
+
+Songs are recognised by how they sound, not by their file name or format,
+so the MP3 from the Downloads tab and the FLAC the Mashup tab downloads of
+the same video count as the same song, as does a file on this PC that was
+renamed or retagged. A different recording (a live version, a remaster, a
+radio edit) counts as a different song. Changing **Quality** separates
+again, since it uses different models or settings.
+
+The saved stems are kept with the models in
+`%LOCALAPPDATA%\AudacityQuickDownloader\stems` (`~/.cache/...` on Linux),
+at about 15 MB per model per song, up to 10 GB by default; past that, the
+songs used longest ago are dropped. Settings > Stem separation shows how much
+is saved, changes the limit, clears it all, or turns this off.
+
 ## Videos
 
 The **Videos** tab (`Ctrl+T` switches tabs) saves videos as .mp4 instead of
@@ -322,6 +348,74 @@ the time, and 89% counting half or double the tempo, against 66% and 84% for
 librosa itself. Half or double is the usual slip, as with every tempo
 detector: a 174 BPM drum and bass track may read 87. Turn it off under
 Settings > Downloads > BPM.
+
+## Mashup
+
+The **Mashup** tab (`Ctrl+T` switches tabs) makes the two songs you give it
+into a mashup. Put one song in each box (a link, a song name to search for,
+or a file on this PC; pasting two links into one box works too) and press
+`Enter`. Then:
+
+1. Both songs are downloaded (losslessly, as FLAC) and their **tempos** found.
+   Tempos about double or half of each other (70 and 140 BPM) count as the
+   same feel, so nothing is stretched to twice its speed.
+2. Each song's **beat grid** is fitted, fine-tuning its tempo to a hundredth
+   of a BPM so the two do not drift apart over the song.
+3. Each song's **bars** are found: which beat is the "one", from where the
+   chords change and where the kick and bass land hardest. The songs are
+   lined up bar to bar, not just beat to beat, even when one starts with a
+   pickup.
+4. Each song's **key** is found from the notes it plays. The vocals song is
+   moved by however many semitones (up to 6 either way) makes its notes fit
+   the other song's best. Keys that already share their notes, like C major
+   and A minor, are left alone. The singer's formants are kept, so a voice
+   moved up does not turn into a chipmunk.
+5. Both are split into **vocals and instrumental** with the separation engine
+   (set it up first, [above](#3-set-up-the-separation-engine); without it the
+   whole songs are matched up instead).
+6. The **levels** are balanced: the vocals keep the loudness they had against
+   their own instrumental, now against the new one (at most 12 dB either way,
+   and never so loud that they clip).
+7. Every stem is **time-stretched** to the shared tempo and key, and silence
+   is put in front of one song so both start their first bar together.
+   ffmpeg's rubberband filter is used when your ffmpeg has it (gyan.dev's full
+   builds and Arch's do), and its atempo and asetrate filters otherwise.
+8. The vocals of one and the instrumental of the other are imported into a
+   **new Audacity project** (or the open one, if it is empty), on top of each
+   other, and the project is saved in the mashup's folder as
+   `<Song 1> x <Song 2>.aup3`, so its window is named after the two songs
+   and you can open it again later.
+
+All four stems are saved at the shared tempo and key in
+`Downloads/Mashups/<Song 1> x <Song 2>/` next to the project, named with their
+tempo and key, so you can swap which song sings. The song downloads themselves are deleted
+afterwards. The card shows both tempos, the one they met at, and how far the
+key moved (`120 & 126 → 126 BPM  +2 st`); the activity log (`Ctrl+L`) has each
+song's key, where its first bar is, and the level changes.
+
+The four chips change this session only; Settings has the defaults:
+
+- **Vocals from**: Song 1 or Song 2. The other gives the instrumental.
+- **Tempo**: the instrumental's (only the vocals are stretched; vocals
+  stretch the most gracefully) or meet halfway (both are stretched a little).
+- **Key**: matched, or kept as it is.
+- **Import**: just the mashup (vocals and instrumental), or all four stems.
+
+What is still up to you:
+
+- **Where the vocals come in.** The songs are lined up from their first bars,
+  so the vocals arrive where they did in their own song. To put the chorus
+  over the drop, slide the vocals track in Audacity by whole bars (4 beats;
+  at 120 BPM a bar is 2 seconds).
+- **Bars in odd places.** Finding the "one" is right for most pop, rock and
+  dance music, but can land a beat or two off on songs with syncopated bass,
+  or not in 4/4. Slide by a beat if the vocals feel off.
+- **Tempo changes.** Songs played live, or that speed up or slow down, have
+  no single tempo, and will drift against the other song over time.
+- **Big jumps.** Stretching by more than about 12% starts to sound stretched
+  (the card says so when that happens), and moving a voice by more than 3 or
+  4 semitones starts to sound processed. Songs close in tempo and key mash up
+  best.
 
 ## Voice datasets for RVC
 
@@ -417,9 +511,9 @@ into lead and backing.
 | `Delete` | Remove a finished download from the list. |
 | `Ctrl+S` | Settings. |
 | `Ctrl+L` | Show or hide the activity log. |
-| `Ctrl+O` | Open the downloads folder (the videos folder on the Videos tab, the artist's folder on the Voice tab). |
+| `Ctrl+O` | Open the downloads folder (the videos folder on the Videos tab, the artist's folder on the Voice tab, the mashups folder on the Mashup tab). |
 | `Ctrl+R` | Clear finished downloads from the list. |
-| `Ctrl+T` | Switch between the Downloads, Videos and Voice datasets tabs. |
+| `Ctrl+T` | Switch between the Downloads, Videos, Voice datasets and Mashup tabs. |
 | `Ctrl+Q` | Quit. |
 
 The line at the bottom always shows the keys that apply right now.
@@ -436,8 +530,9 @@ own, and updating the app never resets them.
 | Downloads | Download folder, audio format (MP3, M4A, Opus, Ogg, FLAC, WAV), bitrate, playlist behaviour, cover art, BPM detection. |
 | Videos | Videos folder, quality (480p to 4K), and whether to save an MP3 too. |
 | Audacity | Import automatically, start Audacity automatically, turn on its scripting module. |
-| Stem separation | Set up or remove the engine, download every model in one go, separate automatically, preset, quality, stems folder, import the original and/or the stems, GPU or CPU, UVR5's folder. Stems use the Downloads format and bitrate. |
+| Stem separation | Set up or remove the engine, download every model in one go, separate automatically, preset, quality, stems folder, import the original and/or the stems, GPU or CPU, UVR5's folder, reusing earlier separations (and how much to keep). Stems use the Downloads format and bitrate. |
 | Voice datasets | Where artist folders go, and whether to remove backing vocals, reverb and echo, and long pauses. |
+| Mashups | Where mashups go, which song the vocals come from, the tempo they meet at, whether to match the key, and whether to import all four stems. |
 | Cookies | Apple Music cookies file, cookies for other sites. |
 | Appearance | Colour theme. |
 
@@ -571,7 +666,9 @@ repository, and it should stay that way.
 | `separation.py` | Finds UVR5, installs the separation engine, runs separations. |
 | `separator_worker.py` | Runs one separation inside `.venv-separator`. |
 | `voice.py` | The Voice datasets tab: its model chain, artist folders and finishing the vocals. |
+| `stemcache.py` | Remembers separations: audio fingerprints, and every model's saved output. |
 | `audacity.py` | Finds, starts and talks to Audacity. |
+| `mashup.py` | The Mashup tab: the shared tempo, beat grids, bars, keys, levels, and stretching. |
 | `updater.py` | Background update check for yt-dlp and gamdl. |
 | `utils.py` | Scratch folders, safe moves, progress reporting, shared errors. |
 | `main-runner.bat` | Double-click launcher for Windows. |

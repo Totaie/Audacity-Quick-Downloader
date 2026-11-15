@@ -18,7 +18,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import audacity
+import mashup
 import separation
+import stemcache
 import tempo
 import voice
 from applemusicdownloader import DEFAULT_COOKIES, download_apple_music
@@ -44,6 +46,7 @@ class Job:
     playlist: bool = False
     voice: str = None  # the artist, for the Voice tab: keep only their vocals
     video: bool = False  # from the Videos tab: save .mp4 (and .mp3)
+    mashup: str = None  # from the Mashup tab: the second song (text is the first)
 
     state: str = QUEUED
     stage: str = "Queued"
@@ -62,6 +65,9 @@ class Job:
     # even if the user has moved to another window since.
     audacity_window: int = None
     bpms: dict = field(default_factory=dict)  # {file: tempo} for each song with a steady beat
+    titles: list = field(default_factory=lambda: [None, None])  # a mashup's two songs
+    target_bpm: float = None  # the tempo a mashup's songs were brought to
+    key_shift: int = None  # semitones a mashup's vocals song was moved by
     message: str = None  # the result, or why it failed
     warnings: list = field(default_factory=list)  # went wrong, but not fatally
     started: float = None
@@ -70,6 +76,7 @@ class Job:
 
     def __post_init__(self):
         self.source = identify(self.text)
+        self.mashup_source = identify(self.mashup) if self.mashup else None
         self.cancel_event = threading.Event()
 
     def touch(self):
@@ -82,16 +89,28 @@ class Job:
     @property
     def bpm_text(self):
         """The tempo, or the range of tempos for a playlist, e.g. "128 BPM"."""
+        if self.mashup and self.target_bpm:
+            before = " & ".join(str(int(round(bpm))) for bpm in self.bpms.values())
+            text = f"{before} → {int(round(self.target_bpm))} BPM"
+            if self.key_shift:
+                text += f"  {self.key_shift:+d} st"
+            return text
         return tempo.describe(self.bpms.values())
 
     @property
     def import_into_audacity(self):
         s = self.settings
-        return not self.voice and not self.video and s.import_to_audacity and (s.import_original or (s.separate and s.import_stems))
+        return not self.voice and not self.video and not self.mashup and s.import_to_audacity and (s.import_original or (s.separate and s.import_stems))
 
     @property
     def label(self):
         """The best name we have for what is being downloaded."""
+        if self.mashup:
+            names = [
+                title or (source.url if source.kind != "search" else text)
+                for title, source, text in zip(self.titles, (self.source, self.mashup_source), (self.text, self.mashup))
+            ]
+            return " × ".join(names)
         if self.collection and self.total and self.total > 1:
             return self.collection
         if self.title:
@@ -147,6 +166,20 @@ class SeparationReporter(JobReporter):
         self.job.touch()
 
 
+class MashupReporter(JobReporter):
+    """Shows which of a mashup's two songs is downloading."""
+
+    def __init__(self, job, number, log_sink=None):
+        super().__init__(job, log_sink)
+        self.number = number
+
+    def item(self, index, total, title, collection=None):
+        job = self.job
+        job.index, job.total = self.number, 2
+        job.title = title or job.title
+        job.touch()
+
+
 class Runner:
     """Runs jobs on a small pool of worker threads.
 
@@ -160,6 +193,7 @@ class Runner:
         self.updater = updater
         self.ask = ask or (lambda question, default=False: default)
         self.uvr = separation.find_uvr(settings.uvr_path)
+        self.stem_cache = stemcache.StemCache(limit_gb=settings.stem_cache_gb)
         self.jobs = []
         self.logs = queue.Queue()
         self._ids = itertools.count(1)
@@ -183,26 +217,40 @@ class Runner:
 
     def refresh_uvr(self):
         self.uvr = separation.find_uvr(self.settings.uvr_path)
+        self.stem_cache.limit_gb = self.settings.stem_cache_gb
         return self.uvr
 
-    def add(self, text, playlist=None, voice=None, video=False):
+    def _cache(self, settings):
+        """The stem cache, if this job's settings say to use it."""
+        return self.stem_cache if settings.reuse_separations else None
+
+    def add(self, text, playlist=None, voice=None, video=False, mashup=None):
         """Queue ``text`` (a link or a search) and return its Job.
 
         With ``voice`` (an artist's name) only the vocals are kept, in that
         artist's voice dataset folder. With ``video`` it is saved as a video.
+        With ``mashup`` (a second link or search) the two are made into a
+        mashup.
         """
         if playlist is None:
             playlist = bool(self.settings.playlist)
-        job = Job(next(self._ids), text, copy.copy(self.settings), playlist=playlist, voice=voice, video=video)
+        if mashup:
+            playlist = False  # one song from each
+        job = Job(
+            next(self._ids), text, copy.copy(self.settings),
+            playlist=playlist, voice=voice, video=video, mashup=mashup,
+        )
         self.jobs.append(job)
         if not job.source.supported:
-            self._finish(job, FAILED, job.source.problem)
+            self._finish(job, FAILED, f"Song 1: {job.source.problem}" if mashup else job.source.problem)
+        elif mashup and not job.mashup_source.supported:
+            self._finish(job, FAILED, f"Song 2: {job.mashup_source.problem}")
         else:
             self._pending.put(job)
         return job
 
     def retry(self, job):
-        return self.add(job.text, job.playlist, job.voice, job.video)
+        return self.add(job.text, job.playlist, job.voice, job.video, job.mashup)
 
     def cancel(self, job):
         if job.finished_state:
@@ -274,6 +322,8 @@ class Runner:
             return self._run_voice(job)
         if job.video:
             return self._run_video(job)
+        if job.mashup:
+            return self._run_mashup(job)
 
         # Without Audacity this is just a downloader; say so once, not after a wait.
         # A running Audacity counts: its scripting pipes are enough to import
@@ -354,24 +404,26 @@ class Runner:
             text += ", but not everything was imported into Audacity"
         self._finish(job, DONE, text + ".")
 
-    def _download(self, job, output_dir=None, audio_format=None, thumbnail=None, skip=None):
-        """Download the job's link. The arguments override the job's settings."""
+    def _download(self, job, output_dir=None, audio_format=None, thumbnail=None, skip=None, source=None, reporter=None):
+        """Download the job's link (or ``source``). The arguments override the job's settings."""
         settings = job.settings
         output_dir = output_dir or settings.downloads
         audio_format = audio_format or settings.audio_format
         thumbnail = settings.embed_thumbnail if thumbnail is None else thumbnail
-        source = job.source
+        source = source or job.source
         if source.kind == "local":
             # Nothing to download: use the files where they are.
             files = local_audio(source.url)
             if not files:
                 raise DownloadError("There are no audio files there.")
-            if len(files) > 1:
+            if job.mashup:
+                pass  # the mashup sorts out its own titles
+            elif len(files) > 1:
                 job.collection, job.total = Path(source.url).name, len(files)
             else:
                 job.title = files[0].stem
             return files
-        reporter = JobReporter(job, self.log)
+        reporter = reporter or JobReporter(job, self.log)
         if source.kind == "apple":
             return download_apple_music(
                 source.url,
@@ -530,6 +582,7 @@ class Runner:
                             device=settings.separation_device,
                             uvr=self.uvr,
                             reporter=SeparationReporter(job, self.log),
+                            cache=self._cache(settings),
                         )
                     except Cancelled:
                         break
@@ -574,6 +627,273 @@ class Runner:
         if not summary:
             return self._finish(job, FAILED, "No vocals were saved.")
         self._finish(job, DONE, text)
+
+    def _run_mashup(self, job):
+        """The Mashup tab: two songs, separated, in one tempo and key, lined up on the bar.
+
+        Both songs are downloaded losslessly into a scratch folder, analysed
+        (tempo, beat grid, downbeat, key), split into vocals and instrumental,
+        then every stem is stretched to the shared tempo, the vocals song is
+        moved into the other's key, the vocals are levelled against their new
+        instrumental, and silence goes in front of whichever song's first bar
+        comes sooner. It is all saved in the mashup's own folder, and the
+        vocals of one song and the instrumental of the other go into a fresh
+        Audacity project.
+        """
+        settings = job.settings
+        first = 0 if settings.mashup_vocals != "second" else 1  # whose vocals
+        other = 1 - first  # whose instrumental, and (by default) tempo
+
+        importing = settings.import_to_audacity
+        if importing and audacity.find_audacity() is None and not audacity.is_running():
+            self._warn(job, "Not imported: Audacity is not installed (see the README to set it up).")
+            importing = False
+        audacity_expected = self._prepare_audacity(settings) if importing else False
+
+        separating = separation.engine_info() is not None
+        if not separating:
+            self._warn(
+                job,
+                "Not separated: set up the separation engine in Settings (Ctrl+S). "
+                "The whole songs were matched up instead.",
+            )
+
+        root = settings.mashups
+        with temp_workspace(root) as work:
+            # 1. Download both. FLAC: lossless, as they are stretched later.
+            songs = []
+            for number, source in enumerate((job.source, job.mashup_source), 1):
+                job.index, job.total, job.title = number, 2, None
+                self._set_stage(job, "Downloading")
+                try:
+                    files = self._download(
+                        job, output_dir=work, audio_format="flac", thumbnail=False,
+                        source=source, reporter=MashupReporter(job, number, self.log),
+                    )
+                except Cancelled:
+                    return self._finish(job, CANCELLED, "Cancelled.")
+                except DownloadError as error:
+                    return self._finish(job, FAILED, f"Song {number}: {error}")
+                if len(files) != 1:
+                    return self._finish(
+                        job, FAILED,
+                        f"Song {number} is {plural(len(files), 'song')}: a mashup takes one song from each box.",
+                    )
+                songs.append(files[0])
+                job.titles[number - 1] = files[0].stem
+                job.touch()
+
+            # 2. Their tempos, and the one they meet at.
+            bpms = []
+            for number, song in enumerate(songs, 1):
+                if job.cancel_event.is_set():
+                    return self._finish(job, CANCELLED, "Cancelled.")
+                job.index, job.title = number, song.stem
+                self._set_stage(job, "Finding the BPM")
+                try:
+                    bpm = tempo.detect(song)
+                except Exception as error:
+                    self.log(f"#{job.id} No BPM for {song.stem}: {error}", "warning")
+                    bpm = None
+                if bpm is None:
+                    return self._finish(
+                        job, FAILED, f"Song {number} ({song.stem}) has no steady beat to match the other song to."
+                    )
+                bpms.append(bpm)
+                job.bpms[str(song)] = bpm
+                job.touch()
+
+            _, vocals_bpm, beat_bpm = mashup.plan(bpms[first], bpms[other], settings.mashup_tempo)
+            counted = [None, None]
+            counted[first], counted[other] = vocals_bpm, beat_bpm
+
+            # 3. Each song's beat grid (its tempo fine-tuned), where its first
+            # bar starts, and its key.
+            self._set_stage(job, "Finding the beat and key")
+            beats, profiles, keys = [], [], []
+            for number, song in enumerate(songs, 1):
+                if job.cancel_event.is_set():
+                    return self._finish(job, CANCELLED, "Cancelled.")
+                job.index, job.title = number, song.stem
+                try:
+                    analysis = mashup.analyse(song, counted[number - 1])
+                except DownloadError as error:
+                    self._warn(job, f"Could not find where the beat starts in {song.stem}: {error}")
+                    beats.append(0.0)
+                    profiles.append(None)
+                    keys.append(None)
+                    continue
+                counted[number - 1] = analysis.bpm
+                beats.append(analysis.downbeat)
+                profiles.append(analysis.profile)
+                keys.append(analysis.key)
+                self.log(f"#{job.id} Song {number}: in {analysis.key or 'no clear key'}, "
+                         f"first bar at {analysis.downbeat:.2f}s  {song.stem}")
+            job.index = job.total = job.title = None
+
+            # The vocals song moves into the other's key (all of it, so the
+            # spare stems fit together too).
+            semitones = [0, 0]
+            if settings.mashup_key and profiles[first] is not None and profiles[other] is not None:
+                semitones[first] = mashup.key_shift(profiles[first], profiles[other])
+                job.key_shift = semitones[first]
+                self.log(
+                    f"#{job.id} Key: {keys[first] or '?'} over {keys[other] or '?'}, so the vocals song is "
+                    f"{mashup.describe_shift(semitones[first])}"
+                )
+            keys_after = [mashup.shift_key(key, shift) for key, shift in zip(keys, semitones)]
+
+            target = mashup.target_tempo(counted[first], counted[other], settings.mashup_tempo)
+            ratios = [target / bpm for bpm in counted]
+            job.target_bpm = target
+            job.touch()
+            # After stretching, a moment t of the song is at t / ratio.
+            starts = [beat / ratio for beat, ratio in zip(beats, ratios)]
+            delays = [max(starts) - start for start in starts]
+            for number, (song, bpm, ratio) in enumerate(zip(songs, counted, ratios), 1):
+                self.log(
+                    f"#{job.id} Song {number}: {bpm:.1f} BPM, {mashup.describe_stretch(ratio)} "
+                    f"to {target:.1f} BPM  {song.stem}"
+                )
+                if abs(ratio - 1) > mashup.COMFORTABLE_STRETCH:
+                    self._warn(
+                        job,
+                        f"Song {number} had to go {mashup.describe_stretch(ratio)}, "
+                        "which can sound stretched. Songs closer in tempo mash up better.",
+                    )
+
+            # 4. Vocals and instrumental of each.
+            parts = []
+            for number, song in enumerate(songs, 1):
+                if job.cancel_event.is_set():
+                    return self._finish(job, CANCELLED, "Cancelled.")
+                if not separating:
+                    parts.append({"Song": song})
+                    continue
+                job.index, job.total, job.title = number, 2, song.stem
+                if self._separation_lock.locked():
+                    self._set_stage(job, "Waiting to separate")
+                with self._separation_lock:
+                    job.step = None
+                    self._set_stage(job, "Separating")
+                    try:
+                        stems = separation.separate(
+                            song,
+                            work,
+                            preset="vocals_instrumental",
+                            audio_format="wav",
+                            cover_art=False,
+                            quality=settings.separation_quality,
+                            device=settings.separation_device,
+                            uvr=self.uvr,
+                            reporter=SeparationReporter(job, self.log),
+                            cache=self._cache(settings),
+                        )
+                    except Cancelled:
+                        return self._finish(job, CANCELLED, "Cancelled.")
+                    except separation.SeparationError as error:
+                        return self._finish(job, FAILED, f"Song {number} ({song.stem}): {error}")
+                    finally:
+                        job.step = None
+                if not {"Vocals", "Instrumental"} <= set(stems):
+                    return self._finish(
+                        job, FAILED, f"Song {number} ({song.stem}) did not separate into vocals and instrumental."
+                    )
+                parts.append(stems)
+
+            # The vocals keep the level they had against their own
+            # instrumental, now against the new one.
+            gains = {}
+            try:
+                if separating:
+                    instrumentals = [mashup.levels(part["Instrumental"])[0] for part in parts]
+                    for index, part in enumerate(parts):
+                        peak = mashup.levels(part["Vocals"])[1]
+                        gains[index, "Vocals"] = mashup.vocal_gain(
+                            instrumentals[index], instrumentals[1 - index], peak
+                        )
+                else:
+                    (own, peak), (new, _) = mashup.levels(parts[first]["Song"]), mashup.levels(parts[other]["Song"])
+                    gains[first, "Song"] = mashup.vocal_gain(own, new, peak)
+            except DownloadError as error:
+                self.log(f"#{job.id} Levels left as they were: {error}", "warning")
+            for (index, part), gain in gains.items():
+                if abs(gain) > 0.05:
+                    self.log(f"#{job.id} {songs[index].stem} ({part.lower()}): {gain:+.1f} dB")
+
+            # 5. Stretch everything to the shared tempo, lined up, into the mashup's folder.
+            names = [mashup.safe_name(song.stem) for song in songs]
+            folder = separation.unique_folder(root, f"{names[first]} x {names[other]}")
+            folder.mkdir(parents=True)
+            if separating:
+                # The mashup itself first; the other two are spares to swap in.
+                order = [(first, "Vocals"), (other, "Instrumental"), (other, "Vocals"), (first, "Instrumental")]
+            else:
+                order = [(first, "Song"), (other, "Song")]
+            job.index = job.total = job.title = None
+            self._set_stage(job, "Matching tempo and key" if any(semitones) else "Matching the tempo")
+            made = []
+            for step, (index, part) in enumerate(order):
+                job.fraction = step / len(order)
+                job.step = f"{names[index]} ({part.lower()})" if part != "Song" else names[index]
+                job.touch()
+                suffix = f" - {part}" if part != "Song" else ""
+                about = f"{int(round(target))} BPM" + (f", {keys_after[index]}" if keys_after[index] else "")
+                destination = unique_path(folder / f"{names[index]}{suffix} ({about}).flac")
+                try:
+                    mashup.stretch(
+                        parts[index][part], destination, ratios[index], delays[index],
+                        vocals=part == "Vocals", cancel_event=job.cancel_event,
+                        semitones=semitones[index], gain_db=gains.get((index, part), 0.0),
+                    )
+                except Cancelled:
+                    job.step = None
+                    return self._finish(job, CANCELLED, f"Cancelled. What was made so far is in {describe_path(folder)}.")
+                except DownloadError as error:
+                    job.step = None
+                    return self._finish(job, FAILED, str(error))
+                try:
+                    tempo.save(destination, target)
+                except Exception as error:
+                    self.log(f"#{job.id} Could not save the BPM in {destination.name}: {error}", "warning")
+                made.append(destination)
+                job.stems.append(destination)
+                job.touch()
+            job.step = None
+            job.fraction = None
+
+        # 6. Into a fresh Audacity project, on top of each other.
+        wanted = made if settings.mashup_import_all else made[:2]
+        imported = False
+        project = None
+        if importing and not job.cancel_event.is_set():
+            timeout = audacity.STARTUP_TIMEOUT if audacity_expected else 10
+            try:
+                # Saved in the mashup's folder, named after the two songs.
+                project = self._import(
+                    job, wanted, timeout, new_project=True, save_as=unique_path(folder / f"{folder.name}.aup3")
+                )
+                imported = True
+            except audacity.AudacityError as error:
+                self._warn(job, f"Not imported: {error}")
+
+        if separating:
+            text = f"{names[first]}'s vocals over {names[other]}'s instrumental"
+        else:
+            text = f"{names[first]} and {names[other]}"
+        text += f" at {target:.0f} BPM"
+        if semitones[first]:
+            text += f", moved {mashup.describe_shift(semitones[first])}"
+            if keys_after[first]:
+                text += f" to {keys_after[first]}"
+        elif settings.mashup_key and keys[first] and keys[other]:
+            text += f" ({keys[first]} and {keys[other]} already fit)"
+        text += f", saved to {describe_path(folder)}"
+        if imported:
+            text += f" and imported into a new Audacity project ({plural(len(wanted), 'track')})"
+            if project is not None:
+                text += f", saved as {project.name}"
+        self._finish(job, DONE, text + ".")
 
     def _separate(self, job, files, on_stems=None):
         """Split each downloaded file into stems. Returns {song: [stem paths]}.
@@ -620,6 +940,7 @@ class Runner:
                         uvr=uvr,
                         reporter=SeparationReporter(job, self.log),
                         on_stems=lambda batch: on_stems and on_stems(list(batch.values())),
+                        cache=self._cache(settings),
                     )
                 except separation.SeparationError as error:
                     self._warn(job, f"{song.stem}: {error}")
@@ -645,12 +966,17 @@ class Runner:
                 self.log(f"{error} Carrying on with the download anyway.", "warning")
                 return False
 
-    def _import(self, job, files, timeout, quietly=False):
+    def _import(self, job, files, timeout, quietly=False, new_project=False, save_as=None):
         """Import ``files`` into Audacity.
 
         ``quietly`` leaves the job's status and progress alone, for stems
         imported while a separation is still showing its own progress.
+        ``new_project`` puts them in a project of their own (the open one,
+        if it is empty). ``save_as`` then saves that project as this .aup3
+        file, which names it; returns the file, or None if it could not be
+        saved (which is only a warning: the tracks are in).
         """
+        saved = None
         stage = (lambda text: None) if quietly else (lambda text: self._set_stage(job, text))
         # Audacity has one scripting connection, so imports take turns.
         stage("Waiting to import" if self._import_lock.locked() else "Importing")
@@ -658,11 +984,21 @@ class Runner:
             stage("Importing into Audacity")
             with audacity.connect(timeout, on_wait=lambda: stage("Waiting for Audacity to start")) as session:
                 stage("Importing into Audacity")
+                if new_project and job.audacity_window is None:
+                    job.audacity_window = session.empty_project()
                 for number, path in enumerate(files, 1):
                     job.audacity_window = session.import_file(Path(path), window=job.audacity_window)
                     job.imported += 1
                     if not quietly:
                         job.fraction = number / len(files)
                     job.touch()
+                if save_as is not None:
+                    stage("Saving the Audacity project")
+                    try:
+                        session.save_project(save_as, window=job.audacity_window)
+                        saved = Path(save_as)
+                    except audacity.AudacityError as error:
+                        self._warn(job, f"The project was not saved under the songs' names: {error}")
         if quietly:
             self.log(f"#{job.id} Imported {', '.join(Path(f).stem for f in files)}", "success")
+        return saved
