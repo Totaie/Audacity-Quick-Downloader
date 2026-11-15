@@ -1,10 +1,13 @@
 """Download Apple Music tracks with gamdl and convert them to the chosen format.
 
-gamdl runs as a separate process with its output captured: the lines saying
-which track it is on and how far through it is are turned into progress for
-the interface, and everything else stays out of sight unless it goes wrong.
+gamdl runs as a separate process with its output captured. It goes through
+gamdl_worker.py, which runs gamdl's ``rip`` command and prints a JSON line for
+each track it starts, how far through it is and how it ended. Those become
+progress for the interface, and everything else stays out of sight unless it
+goes wrong.
 """
 
+import json
 import os
 import re
 import subprocess
@@ -29,7 +32,9 @@ from utils import (
     temp_workspace,
 )
 
-DEFAULT_COOKIES = Path(__file__).resolve().parent / "cookies.txt"
+HERE = Path(__file__).resolve().parent
+DEFAULT_COOKIES = HERE / "cookies.txt"
+WORKER = HERE / "gamdl_worker.py"
 
 # gamdl names files "01 Title" by default. Asking for plain titles up front is
 # tidier than trying to strip leading track numbers back off afterwards.
@@ -42,18 +47,27 @@ FILE_TEMPLATES = [
     "{title}",
 ]
 
-# [INFO     12:00:00] [Track   3/12 ] Downloading "Song name"
-TRACK_LINE = re.compile(r'\[Track\s+(\d+)\s*/\s*(\d+|-)\s*\]\s+Downloading "(.*)"')
-# [download]  45.3% of 5.00MiB at 1.20MiB/s ETA 00:03, from yt-dlp inside gamdl
-PERCENT = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
-LEVEL = re.compile(r"^\[(WARNING|ERROR|CRITICAL)\b")
+# What gamdl_worker.py puts in front of its event lines.
+EVENT_PREFIX = "@@gamdl "
+# gamdl's own messages: "✗ Song: reason", "Error: ...", "! warning".
+ERROR_LINE = re.compile(r"^(?:✗|Error:|Errors \(\d+\):)")
+WARNING_LINE = re.compile(r"^! ")
+
+STAGES = {
+    "fetching_tags": "Reading tags",
+    "fetching_streams": "Finding streams",
+    "fetching_decryption_keys": "Getting keys",
+    "downloading": "Downloading",
+    "muxing": "Muxing",
+    "tagging": "Tagging",
+}
 
 
 def _gamdl_command(url, destination, cookies):
     """Build the gamdl call, running it through this interpreter.
 
-    Using "-m gamdl" rather than the gamdl executable means it works even when
-    the virtual environment has not been activated.
+    Running it with this interpreter rather than the gamdl executable means it
+    works even when the virtual environment has not been activated.
     """
     if not module_available("gamdl"):
         raise MissingDependency(
@@ -62,13 +76,24 @@ def _gamdl_command(url, destination, cookies):
 
     return [
         python_executable(),
-        "-m",
-        "gamdl",
+        str(WORKER),
+        "--auth-mode",
+        "cookies",
         "--cookies-path",
         str(cookies),
-        "--output-path",
+        "--output-dir",
         str(destination),
-        "--no-synced-lyrics",
+        # AAC through the Widevine route cookies give; the web stream if not.
+        "--song-codec-priority",
+        "aac,aac-web",
+        "--no-lyrics-file",
+        # gamdl's media index would skip songs it remembers downloading to
+        # an earlier scratch folder.
+        "--no-database",
+        # One track at a time, so progress reads as one track after another.
+        "--concurrent-downloads",
+        "1",
+        "--no-progress",
         *FILE_TEMPLATES,
         url,
     ]
@@ -80,35 +105,66 @@ class _GamdlOutput:
     def __init__(self, reporter):
         self.reporter = reporter
         self.tail = []  # the last few lines, to explain a failure
+        self.errors = []  # why individual tracks failed
+        self.total = None
+        self.title = None
 
     def feed(self, line):
         line = strip_ansi(line).strip()
         if not line:
             return
+        if line.startswith(EVENT_PREFIX):
+            try:
+                event = json.loads(line[len(EVENT_PREFIX):])
+            except ValueError:
+                return
+            self._event(event)
+            return
+
         self.tail = (self.tail + [line])[-15:]
+        if ERROR_LINE.match(line):
+            if not line.startswith("Errors ("):
+                self.reporter.log(line.lstrip("✗").strip(), "error")
+        elif WARNING_LINE.match(line):
+            self.reporter.log(line[2:], "warning")
 
-        track = TRACK_LINE.search(line)
-        if track:
-            index, total, title = track.groups()
-            self.reporter.item(int(index), int(total) if total.isdigit() else None, title)
-            self.reporter.stage("Downloading")
-            self.reporter.progress(0.0)
-            return
-
-        if line.startswith("[download]"):
-            percent = PERCENT.search(line)
-            if percent:
-                self.reporter.progress(min(float(percent.group(1)) / 100, 1.0))
-            return
-
-        level = LEVEL.match(line)
-        if level:
-            message = line.split("]", 2)[-1].strip() if "]" in line else line
-            self.reporter.log(message, "warning" if level.group(1) == "WARNING" else "error")
+    def _event(self, event):
+        kind = event.get("type")
+        if kind == "discovered":
+            if event.get("final"):
+                self.total = event.get("count")
+        elif kind == "track":
+            self.title = event.get("title") or ""
+            self.reporter.item(event.get("index", 1), self.total, self.title)
+            self.reporter.stage("Looking it up")
+            self.reporter.progress(None)
+        elif kind == "stage":
+            stage = event.get("stage", "")
+            self.reporter.stage(STAGES.get(stage, stage.replace("_", " ").capitalize()))
+            if stage == "downloading":
+                self.reporter.progress(0.0)
+        elif kind == "progress":
+            percent = event.get("percent")
+            if isinstance(percent, (int, float)):
+                self.reporter.progress(min(max(percent / 100, 0.0), 1.0))
+        elif kind == "finished":
+            status = event.get("status")
+            title = event.get("title") or self.title or "Track"
+            if status == "failed":
+                reason = event.get("message") or "failed"
+                self.errors.append(f"{title}: {reason}")
+                self.reporter.log(f"{title}: {reason}", "error")
+            elif status == "skipped":
+                reason = event.get("message")
+                self.reporter.log(
+                    f"Skipped {title}" + (f": {reason}" if reason else ""), "warning"
+                )
 
     def explain(self):
-        errors = [line for line in self.tail if LEVEL.match(line)]
-        return (errors or self.tail or ["(no output)"])[-1]
+        if self.errors:
+            return self.errors[-1]
+        errors = [line for line in self.tail if ERROR_LINE.match(line) and not line.startswith("Errors (")]
+        return (errors or self.tail or ["(no output)"])[-1].lstrip("✗").strip()
 
 
 def _run_gamdl(command, reporter):

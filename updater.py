@@ -36,6 +36,9 @@ HELPERS = ("deno", "yt-dlp-ejs")
 # is used with, and asking for it through yt-dlp's [default] extra gets the
 # version that yt-dlp pins.
 PIP_NAMES = {"yt-dlp": "yt-dlp[default]", "yt-dlp-ejs": "yt-dlp[default]"}
+# Major versions a package is kept below, for when a new major release breaks
+# how this app drives it, e.g. {"gamdl": 5}. Empty means always the latest.
+CAPS = {}
 PYPI_URL = "https://pypi.org/pypi/{}/json"
 CHECK_TIMEOUT = 10
 INSTALL_TIMEOUT = 600  # the first Deno download is around 40 MB
@@ -59,16 +62,38 @@ def installed_version(name):
         return None
 
 
-def latest_version(name):
-    """The newest release on PyPI, or None if PyPI cannot be reached."""
+def latest_version(name, cap=None):
+    """The newest release on PyPI, or None if PyPI cannot be reached.
+
+    With ``cap``, the newest final release whose major version is below it.
+    """
     request = urllib.request.Request(
         PYPI_URL.format(name), headers={"Accept": "application/json"}
     )
     try:
         with urllib.request.urlopen(request, timeout=CHECK_TIMEOUT) as response:
-            return json.load(response)["info"]["version"]
-    except (OSError, ValueError, KeyError):
+            data = json.load(response)
+    except (OSError, ValueError):
         return None
+    try:
+        if cap is None:
+            return data["info"]["version"]
+        candidates = [
+            version
+            for version, files in data["releases"].items()
+            if re.fullmatch(r"[\d.]+", version)  # skip alphas, betas and rcs
+            and files
+            and not all(file.get("yanked") for file in files)
+            and _version_key(version)[:1] < (cap,)
+        ]
+    except (KeyError, TypeError, AttributeError):
+        return None
+    return max(candidates, key=_version_key, default=None)
+
+
+def pip_spec(name):
+    spec = PIP_NAMES.get(name, name)
+    return f"{spec}<{CAPS[name]}" if name in CAPS else spec
 
 
 def _version_key(version):
@@ -134,7 +159,9 @@ class Updater:
 
         names = [name for name, status in self.packages.items() if not status.helper]
         with ThreadPoolExecutor(max_workers=len(names)) as pool:
-            latest = dict(zip(names, pool.map(latest_version, names)))
+            latest = dict(
+                zip(names, pool.map(lambda name: latest_version(name, CAPS.get(name)), names))
+            )
 
         for name, version in latest.items():
             status = self.packages[name]
@@ -165,7 +192,7 @@ class Updater:
             "--upgrade",
             "--disable-pip-version-check",
             "--quiet",
-            *dict.fromkeys(PIP_NAMES.get(status.name, status.name) for status in outdated),
+            *dict.fromkeys(pip_spec(status.name) for status in outdated),
         ]
         try:
             result = subprocess.run(

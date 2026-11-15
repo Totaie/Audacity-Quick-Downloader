@@ -663,12 +663,13 @@ repository, and it should stay that way.
 | `ytdlpdownloader.py` | yt-dlp wrapper: YouTube, SoundCloud and everything else, as audio or video. |
 | `tempo.py` | Finds a song's BPM and saves it in its tags. |
 | `applemusicdownloader.py` | gamdl wrapper plus format conversion. |
+| `gamdl_worker.py` | Runs `gamdl rip` and reports each track's progress back as JSON lines. |
 | `separation.py` | Finds UVR5, installs the separation engine, runs separations. |
 | `separator_worker.py` | Runs one separation inside `.venv-separator`. |
-| `voice.py` | The Voice datasets tab: its model chain, artist folders and finishing the vocals. |
 | `stemcache.py` | Remembers separations: audio fingerprints, and every model's saved output. |
-| `audacity.py` | Finds, starts and talks to Audacity. |
+| `voice.py` | The Voice datasets tab: its model chain, artist folders and finishing the vocals. |
 | `mashup.py` | The Mashup tab: the shared tempo, beat grids, bars, keys, levels, and stretching. |
+| `audacity.py` | Finds, starts and talks to Audacity. |
 | `updater.py` | Background update check for yt-dlp and gamdl. |
 | `utils.py` | Scratch folders, safe moves, progress reporting, shared errors. |
 | `main-runner.bat` | Double-click launcher for Windows. |
@@ -743,13 +744,13 @@ host, or run with `--plain`.
 
 **Apple Music downloads fail immediately**
 
-If the error mentions **status code 403** while fetching account info, your
-`cookies.txt` has expired — export it again as described above. Cookies are
+If the error says **Authentication failed** (or mentions **status code
+403**), your `cookies.txt` has expired — export it again as described above. Cookies are
 tied to a browser session and do not last indefinitely.
 
 If it mentions a **token** or an unexpected page, gamdl has fallen behind a
-change on Apple's website. gamdl 2.x no longer works at all, so make sure you
-are on 3.x or newer:
+change on Apple's website. The app is written for gamdl 4, whose command line
+differs from 3.x, so make sure you are on 4.0.1 or newer:
 
 ```bash
 pip install --upgrade gamdl

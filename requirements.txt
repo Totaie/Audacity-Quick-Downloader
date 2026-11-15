@@ -1,8 +1,9 @@
 # Python dependencies. ffmpeg also has to be installed and on your PATH.
 # yt-dlp[default] adds yt-dlp-ejs, which with Deno gives full YouTube support.
 yt-dlp[default]>=2025.11.12
-# gamdl 2.x no longer works against Apple Music.
-gamdl>=3.8.4
+# gamdl 4 replaced its command line; applemusicdownloader.py and
+# gamdl_worker.py are written for it.
+gamdl>=4.0.1
 # The JavaScript runtime yt-dlp uses for YouTube, packaged for pip.
 deno>=2.0
 # The full screen terminal interface.
